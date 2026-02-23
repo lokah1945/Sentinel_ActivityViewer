@@ -1,116 +1,159 @@
-# 🛡️ Sentinel v3.0 — Maling Catcher
+# 🛡️ Sentinel v4.0 — Forensic Maling Catcher
 
-**Browser Activity Viewer with Stealth Mode** — Detects and reports all fingerprinting, tracking, and suspicious browser API activity from any website.
+> **7-Layer Architecture | 31 API Categories | 1H5W Forensic Framework**
 
-## 🚀 Quick Start
+Sentinel v4 is a forensic browser activity viewer that detects, captures, and attributes fingerprinting activity on any website. Built as a complete upgrade from v3, it fixes all 6 critical bugs and adds 12+ new detection vectors.
+
+## 🆕 What's New in v4
+
+### Critical Bug Fixes
+| Bug | v3 Problem | v4 Fix |
+|-----|-----------|--------|
+| Stealth 0 events | `addInitScript` race condition with isolated world | CDP `Page.addScriptToEvaluateOnNewDocument` in MAIN world |
+| Cross-origin crash | `SecurityError` on `window.top` access | `try/catch` wrappers + CDP auto-attach for cross-origin frames |
+| Data locked per-frame | `window.__SENTINEL_DATA__` only readable from same frame | `Runtime.addBinding` push-based telemetry + multi-frame collector |
+| No value capture | Only counted API calls, never logged return values | Every hook captures actual return value |
+| No stack trace | No caller identification | Stack sampling every N calls per API |
+| No anti-detection | Hooks detectable by CreepJS/bots | Anti-Detection Shield with toString/descriptor spoofing |
+
+### New Features
+- **7-Layer Architecture**: CDP → Shield → Core Hooks → Extended Hooks → Exfil Monitor → Correlation → Reporting
+- **31 API Categories**: 19 enhanced + 12 new (speech, client-hints, intl, CSS.supports, property-enum, offscreen-canvas, WebSocket, img exfil, mutation/intersection observers, gamepad, credentials, honeypot)
+- **Value Capture**: Every hooked API logs its actual return value (forensic evidence)
+- **Stack Sampling**: Periodic `Error.stack` capture to identify WHO is calling each API
+- **1H5W Forensic Framework**: Every report answers WHO, WHAT, WHEN, WHERE, WHY, HOW
+- **BOOT_OK Protocol**: Mandatory event per execution context proves monitoring coverage
+- **Library Attribution**: Signature database identifies FingerprintJS, CreepJS, BotD, BrowserScan
+- **Burst Detection**: Identifies fingerprinting bursts (50+ events in 1s window)
+- **Entropy Calculation**: Shannon entropy for category/API/origin diversity
+- **Exfiltration Monitor**: Tracks sendBeacon, WebSocket, tracking pixels, and data URLs
+- **Honeypot Properties**: Planted trap properties that trigger on active fingerprinting probes
+- **Anti-Detection Shield**: toString spoofing, descriptor caching, stack trace cleanup
+
+## 📦 Installation
 
 ```bash
-# Install dependencies
+git clone https://github.com/lokah1945/Sentinel_ActivityViewer.git
+cd Sentinel_ActivityViewer
 npm install
+```
 
-# Interactive mode (akan minta input URL)
-npm start
+## 🚀 Usage
 
-# Quick scan dengan stealth (default)
-node index.js browserscan.net
+```bash
+# Interactive mode
+node index.js
 
-# Observe mode (tanpa stealth, deteksi mentah)
-node index.js browserscan.net --observe
+# Quick scan (stealth mode — default)
+node index.js https://browserscan.net
 
-# Dual mode (jalankan kedua mode & bandingkan hasilnya)
-node index.js browserscan.net --dual-mode
+# Observe mode (no stealth, more detectable)
+node index.js https://browserscan.net --observe
 
-# Custom timeout (default 30s)
-node index.js browserscan.net --timeout=45000
+# Dual mode — runs both and compares
+node index.js https://browserscan.net --dual-mode
+
+# Custom timeout
+node index.js https://browserscan.net --timeout=60000
 
 # Headless mode
-node index.js browserscan.net --headless
+node index.js https://browserscan.net --headless
 ```
+
+## 📊 Output Files
+
+Each scan generates 3 files in `output/`:
+
+| File | Format | Content |
+|------|--------|---------|
+| `*_report.json` | JSON | Full forensic data: events, values, correlation, 1H5W |
+| `*_report.html` | HTML | Interactive dashboard with timeline, tabs, charts |
+| `*_context-map.json` | JSON | Frame coverage proof with BOOT_OK status |
 
 ## 🏗️ Architecture
 
 ```
-sentinel_v3/
-├── index.js                    # CLI entry point
-├── package.json
-├── hooks/
-│   ├── stealth-config.js       # Stealth plugin + extra hardening
-│   └── api-interceptor.js      # 18-category API hook engine
-├── reporters/
-│   └── report-generator.js     # JSON + HTML + Context Map generator
-├── output/                     # Scan results saved here
-└── README.md
+Layer 7: 1H5W Forensic Report   ← reporters/report-generator.js
+Layer 6: Behavior Correlation    ← lib/correlation-engine.js + lib/signature-db.js
+Layer 5: Exfiltration Monitor    ← hooks/api-interceptor.js (network hooks)
+Layer 4: Extended Hooks (12)     ← hooks/api-interceptor.js (new vectors)
+Layer 3: Core Hooks (19)         ← hooks/api-interceptor.js (enhanced)
+Layer 2: Anti-Detection Shield   ← hooks/anti-detection-shield.js
+Layer 1: CDP Injection           ← index.js (Page.addScriptToEvaluateOnNewDocument)
 ```
 
-## 🔍 18 Monitored Categories
+## 🔍 31 Monitored Categories
 
-| Category | APIs Hooked | Risk |
-|----------|-------------|------|
-| Canvas | toDataURL, toBlob, getImageData, fillText, isPointInPath | 🔴 HIGH |
-| WebGL | getParameter, getExtension, getSupportedExtensions, getShaderPrecisionFormat, readPixels | 🔴 HIGH |
-| Audio | OfflineAudioContext, createOscillator, createDynamicsCompressor, createAnalyser, baseLatency | 🔴 CRITICAL |
-| Font Detection | measureText, document.fonts.check, getBoundingClientRect, offsetWidth | 🔴 HIGH |
-| Fingerprint | userAgent, platform, languages, hardwareConcurrency, deviceMemory, plugins, matchMedia | 🔴 HIGH |
-| Math Fingerprint | acos, acosh, asin, sinh, cos, tan, exp, expm1, log1p (15 functions) | 🟡 HIGH |
-| Permissions | navigator.permissions.query | 🔴 HIGH |
-| Storage | cookie get/set, localStorage, sessionStorage, indexedDB | 🟡 MEDIUM |
-| Screen | width, height, colorDepth, pixelDepth, availWidth, devicePixelRatio | 🟡 MEDIUM |
-| Network | fetch, XMLHttpRequest, sendBeacon | 🟡 MEDIUM |
-| WebRTC | RTCPeerConnection | 🔴 CRITICAL |
-| Performance | getEntries, getEntriesByType, performance.now | 🟡 MEDIUM |
-| Media Devices | enumerateDevices | 🔴 CRITICAL |
-| DOM Probe | createElement (canvas/iframe/audio/video) | 🟡 MEDIUM |
-| Clipboard | readText, writeText | 🔴 CRITICAL |
-| Geolocation | getCurrentPosition, watchPosition | 🔴 CRITICAL |
-| Service Worker | register | 🔴 HIGH |
-| Hardware | getBattery, timezone, architecture | 🟡 MEDIUM |
+| # | Category | Risk | What It Detects |
+|---|----------|------|-----------------|
+| 1 | canvas | HIGH | Canvas toDataURL/getImageData pixel fingerprint |
+| 2 | webgl | HIGH | GPU vendor/renderer/precision fingerprint |
+| 3 | audio | CRITICAL | AudioContext/OfflineAudioContext fingerprint |
+| 4 | font-detection | HIGH | Installed font enumeration via measureText/BCR |
+| 5 | fingerprint | HIGH | Navigator properties (userAgent, platform, etc.) |
+| 6 | permissions | HIGH | Permission state probing |
+| 7 | storage | MEDIUM | Cookie/localStorage/IndexedDB tracking |
+| 8 | screen | MEDIUM | Display resolution/color depth |
+| 9 | network | MEDIUM | Fetch/XHR network requests |
+| 10 | webrtc | CRITICAL | WebRTC IP leak attempts |
+| 11 | perf-timing | MEDIUM | Performance API timing attacks |
+| 12 | math-fingerprint | MEDIUM | Math function precision differences |
+| 13 | media-devices | CRITICAL | Camera/microphone enumeration |
+| 14 | dom-probe | LOW | DOM element creation/mutation monitoring |
+| 15 | clipboard | CRITICAL | Clipboard read/write access |
+| 16 | geolocation | CRITICAL | Physical location tracking |
+| 17 | service-worker | HIGH | Persistent background code |
+| 18 | hardware | HIGH | Battery/gamepad/device probing |
+| 19 | architecture | MEDIUM | CPU architecture detection |
+| 20 | speech | HIGH | TTS voice fingerprinting |
+| 21 | client-hints | CRITICAL | UA-CH high-entropy values |
+| 22 | intl-fingerprint | MEDIUM | Intl API locale fingerprinting |
+| 23 | css-fingerprint | MEDIUM | CSS.supports feature detection |
+| 24 | property-enum | HIGH | Prototype inspection/lie detection |
+| 25 | offscreen-canvas | HIGH | Worker-based canvas fingerprinting |
+| 26 | exfiltration | CRITICAL | sendBeacon/WebSocket/pixel tracking |
+| 27 | honeypot | CRITICAL | Planted trap property access |
+| 28 | credential | CRITICAL | WebAuthn/passkey probing |
+| 29 | system | INFO | BOOT_OK coverage proof events |
+| 30 | dom-probe (MO) | LOW | MutationObserver monitoring |
+| 31 | dom-probe (IO) | LOW | IntersectionObserver monitoring |
 
-## 🥷 Stealth Mode
+## 📋 1H5W Forensic Framework
 
-Stealth mode uses **17 evasion techniques** from `puppeteer-extra-plugin-stealth`:
+Every generated report answers:
 
-- `chrome.app` / `chrome.csi` / `chrome.loadTimes` / `chrome.runtime`
-- `navigator.webdriver` / `navigator.plugins` / `navigator.vendor` / `navigator.permissions` / `navigator.languages` / `navigator.hardwareConcurrency`
-- `user-agent-override` / `media.codecs`
-- `iframe.contentWindow` / `window.outerdimensions`
-- `webgl.vendor` / `sourceurl` / `defaultArgs`
+- **WHO** (👤): Which library/script is fingerprinting (via attribution engine)
+- **WHAT** (📋): Total events, categories, specific APIs called + return values
+- **WHEN** (⏱️): Precise timestamps, burst analysis, scan duration
+- **WHERE** (📍): Origins, frames, coverage proof per execution context
+- **WHY** (❓): Risk reasoning for each API call, threat severity
+- **HOW** (🔧): Technical method used (e.g., "OfflineAudioContext + Oscillator + Compressor")
 
-**Plus Extra Stealth Layer:**
-- Deep webdriver property cleanup
-- Permissions API spoofing
-- Chrome runtime emulation
-- Connection API spoofing
-- Stack trace cleanup (removes playwright/puppeteer traces)
-- Notification permission normalization
+## 🔐 Anti-Detection Shield
 
-## 🔄 Dual Mode
+The shield prevents fingerprinting libraries from detecting Sentinel's presence:
 
-Run `--dual-mode` to execute both STEALTH and OBSERVE scans, then compare:
+- **toString Spoofing**: Hooked functions return native `function X() { [native code] }` strings
+- **Descriptor Caching**: `Object.getOwnPropertyDescriptor` returns original descriptors for hooked properties
+- **Stack Cleanup**: Removes Sentinel/Playwright/Puppeteer frames from `Error.stack`
+- **Property Integrity**: Function `.name` and `.length` preserved to match originals
 
-```
-  📊 DUAL MODE COMPARISON
-  Metric                    STEALTH         OBSERVE
-  ───────────────────────────────────────────────
-  Risk Score                62              48
-  Total Events              1247            869
-  Categories                14              9
-```
+## 📚 Library Attribution
 
-This reveals whether the target website **behaves differently** when it detects automation.
+Sentinel v4 identifies known fingerprinting libraries by matching API call patterns:
 
-## 📊 Output
+| Library | Detection Method |
+|---------|-----------------|
+| FingerprintJS v3-v5 | isPointInPath + audio + fonts + math + WebGL burst |
+| CreepJS | toString probe + prototype inspection + offscreen canvas |
+| BotD | webdriver + chrome.runtime + stack analysis |
+| BrowserScan | Full parameter scan + media + WebRTC |
+| ClientJS | Legacy userAgent + plugins + screen |
 
-Each scan generates 3 files in `./output/`:
-- `*_report.json` — Structured metrics, threats, risk score
-- `*_report.html` — Visual dashboard with threat assessment
-- `*_context-map.json` — Frame/origin hierarchy
-
-## ⚠️ FingerprintJS v5 Detection
-
-Sentinel v3 automatically detects the **FingerprintJS v5 signature** pattern:
-- Canvas `isPointInPath` + audio fingerprinting + font detection + math fingerprinting
-- Triggers a CRITICAL threat alert when detected
-
-## License
+## 📄 License
 
 MIT
+
+---
+
+**Sentinel v4** — *Tidak ada satu gerakan pun dari maling yang tidak terdeteksi* 🛡️
