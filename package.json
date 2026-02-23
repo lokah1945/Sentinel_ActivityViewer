@@ -1,0 +1,19 @@
+{
+  "name": "sentinel-owner-mode",
+  "version": "1.0.0",
+  "description": "Zero-Trust Browser Security Observatory — Chromium Only",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/run.ts",
+    "start:lockdown": "SENTINEL_MODE=lockdown tsx src/run.ts",
+    "start:headed": "HEADLESS=0 tsx src/run.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.50.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.5.4",
+    "@types/node": "^22.0.0"
+  }
+}
