@@ -1,240 +1,336 @@
 /**
- * Sentinel v3 — Report Generator
- * Produces JSON, HTML, and context-map outputs
+ * Sentinel v4.1 — Forensic Report Generator (Layer 7)
+ * JSON + HTML + Context Map with 1H5W forensic framework
  */
 
 const fs = require('fs');
 const path = require('path');
+const { CorrelationEngine } = require('../lib/correlation-engine');
 
 function generateReport(sentinelData, contextMap, targetUrl, options = {}) {
   const outputDir = options.outputDir || path.join(__dirname, '..', 'output');
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const prefix = options.prefix || `sentinel_${timestamp}`;
+  const prefix = options.prefix || `sentinel_${Date.now()}`;
 
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
   const events = sentinelData.events || [];
 
-  // ── Analyze events ──
+  // Correlation Engine Analysis
+  const correlator = new CorrelationEngine();
+  correlator.ingestEvents(events);
+  const correlation = correlator.getReport();
+
+  // Analyze events
   const byCategory = {};
-  const byRisk = { low: 0, medium: 0, high: 0, critical: 0 };
+  const byRisk = { info: 0, low: 0, medium: 0, high: 0, critical: 0 };
   const apiCounts = {};
   const originSet = new Set();
+  const frameSet = new Set();
   const timelineSlots = {};
+  const valueCaptures = [];
 
   for (const e of events) {
     byCategory[e.cat] = (byCategory[e.cat] || 0) + 1;
     byRisk[e.risk] = (byRisk[e.risk] || 0) + 1;
     apiCounts[e.api] = (apiCounts[e.api] || 0) + 1;
     originSet.add(e.origin);
+    if (e.frameId) frameSet.add(e.frameId);
 
     const slot = Math.floor(e.ts / 1000);
     timelineSlots[slot] = (timelineSlots[slot] || 0) + 1;
+
+    if (e.value && e.value !== 'undefined' && e.value !== 'null') {
+      valueCaptures.push({
+        ts: e.ts,
+        api: e.api,
+        value: e.value,
+        category: e.cat
+      });
+    }
   }
 
   const topApis = Object.entries(apiCounts)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 20)
+    .slice(0, 30)
     .map(([api, count]) => ({ api, count }));
 
-  // ── Risk Score calculation ──
+  // Risk Score
   const riskScore = Math.min(100, Math.round(
     (byRisk.critical * 15) +
     (byRisk.high * 5) +
     (byRisk.medium * 1) +
     (byRisk.low * 0.1) +
-    (Object.keys(byCategory).length * 3) +
-    (originSet.size > 2 ? (originSet.size - 1) * 5 : 0)
+    (Object.keys(byCategory).length * 2) +
+    (originSet.size > 2 ? (originSet.size - 1) * 5 : 0) +
+    (correlation.summary.fingerprintBursts * 10) +
+    (correlation.summary.exfilAttempts * 5) +
+    (correlation.summary.honeypotTriggered ? 20 : 0)
   ));
 
-  // ── Threat Assessment ──
+  // Threat Assessment
   const threats = [];
-  if (byCategory['audio'] > 0) threats.push({ type: 'Audio Fingerprinting', severity: 'HIGH', detail: `${byCategory['audio']} audio API calls detected` });
-  if (byCategory['canvas'] > 0) threats.push({ type: 'Canvas Fingerprinting', severity: 'HIGH', detail: `${byCategory['canvas']} canvas operations` });
-  if (byCategory['webgl'] > 0) threats.push({ type: 'WebGL Fingerprinting', severity: 'HIGH', detail: `${byCategory['webgl']} WebGL parameter reads` });
-  if (byCategory['font-detection'] > 50) threats.push({ type: 'Font Enumeration', severity: 'CRITICAL', detail: `${byCategory['font-detection']} font probing calls — likely full font scan` });
-  if (byCategory['webrtc'] > 0) threats.push({ type: 'WebRTC IP Leak Attempt', severity: 'CRITICAL', detail: `${byCategory['webrtc']} WebRTC connection attempts` });
-  if (byCategory['geolocation'] > 0) threats.push({ type: 'Geolocation Request', severity: 'CRITICAL', detail: `Attempted to read device location` });
-  if (byCategory['clipboard'] > 0) threats.push({ type: 'Clipboard Access', severity: 'CRITICAL', detail: `Attempted clipboard read/write` });
-  if (byCategory['media-devices'] > 0) threats.push({ type: 'Media Device Enumeration', severity: 'HIGH', detail: `Attempted to list cameras/microphones` });
-  if (byCategory['service-worker'] > 0) threats.push({ type: 'Service Worker Registration', severity: 'HIGH', detail: `Attempted persistent background code` });
-  if (byCategory['math-fingerprint'] > 10) threats.push({ type: 'Math Fingerprinting', severity: 'MEDIUM', detail: `${byCategory['math-fingerprint']} Math function probes` });
-  if (byCategory['storage'] > 50) threats.push({ type: 'Aggressive Storage Usage', severity: 'MEDIUM', detail: `${byCategory['storage']} storage operations` });
-  if (originSet.size > 3) threats.push({ type: 'Multi-Origin Tracking', severity: 'HIGH', detail: `${originSet.size} unique origins detected — possible cross-domain tracking` });
 
-  // ── FingerprintJS v5 detection ──
-  const fpjsSignature = events.some(e => e.api === 'isPointInPath' && e.cat === 'canvas') &&
-    events.some(e => e.cat === 'audio') &&
-    events.some(e => e.cat === 'font-detection') &&
-    events.some(e => e.cat === 'math-fingerprint');
-  if (fpjsSignature) {
-    threats.push({ type: '⚠️ FingerprintJS-like Library Detected', severity: 'CRITICAL',
-      detail: 'Combination of canvas(isPointInPath), audio, font-detection, and math fingerprinting matches FingerprintJS v5 pattern' });
+  if (byCategory['audio'] > 0) threats.push({ type: 'Audio Fingerprinting', severity: 'HIGH', detail: `${byCategory['audio']} audio API calls`, who: 'Audio processing pipeline', how: 'OfflineAudioContext + Oscillator + Compressor' });
+  if (byCategory['canvas'] > 0) threats.push({ type: 'Canvas Fingerprinting', severity: 'HIGH', detail: `${byCategory['canvas']} canvas operations`, who: 'Canvas renderer', how: 'toDataURL/getImageData pixel hash' });
+  if (byCategory['webgl'] > 0) threats.push({ type: 'WebGL Fingerprinting', severity: 'HIGH', detail: `${byCategory['webgl']} WebGL parameter reads`, who: 'WebGL context', how: 'getParameter(VENDOR/RENDERER)' });
+  if (byCategory['font-detection'] > 50) threats.push({ type: 'Font Enumeration', severity: 'CRITICAL', detail: `${byCategory['font-detection']} font probing calls`, who: 'Font detection engine', how: 'measureText/getBoundingClientRect' });
+  if (byCategory['webrtc'] > 0) threats.push({ type: 'WebRTC IP Leak', severity: 'CRITICAL', detail: `${byCategory['webrtc']} WebRTC connections`, who: 'WebRTC STUN/TURN', how: 'RTCPeerConnection ICE harvesting' });
+  if (byCategory['geolocation'] > 0) threats.push({ type: 'Geolocation Request', severity: 'CRITICAL', detail: 'Location access attempt', who: 'Geolocation API', how: 'getCurrentPosition' });
+  if (byCategory['clipboard'] > 0) threats.push({ type: 'Clipboard Access', severity: 'CRITICAL', detail: 'Clipboard read/write', who: 'Clipboard API' });
+  if (byCategory['media-devices'] > 0) threats.push({ type: 'Media Device Enum', severity: 'HIGH', detail: 'Camera/mic listing', who: 'MediaDevices API' });
+  if (byCategory['service-worker'] > 0) threats.push({ type: 'Service Worker', severity: 'HIGH', detail: 'Persistent background code', who: 'ServiceWorker API' });
+  if (byCategory['math-fingerprint'] > 10) threats.push({ type: 'Math Fingerprinting', severity: 'MEDIUM', detail: `${byCategory['math-fingerprint']} Math probes`, who: 'Math precision engine' });
+  if (byCategory['storage'] > 50) threats.push({ type: 'Aggressive Storage', severity: 'MEDIUM', detail: `${byCategory['storage']} storage operations` });
+  if (byCategory['speech'] > 0) threats.push({ type: 'Speech Voice Fingerprint', severity: 'HIGH', detail: `${byCategory['speech']} speech probes`, who: 'Web Speech API' });
+  if (byCategory['client-hints'] > 0) threats.push({ type: 'Client Hints Probing', severity: 'HIGH', detail: `${byCategory['client-hints']} UA-CH requests`, who: 'UA-CH API' });
+  if (byCategory['intl-fingerprint'] > 0) threats.push({ type: 'Intl API Fingerprint', severity: 'MEDIUM', detail: `${byCategory['intl-fingerprint']} Intl probes` });
+  if (byCategory['css-fingerprint'] > 0) threats.push({ type: 'CSS Feature Detection', severity: 'MEDIUM', detail: `${byCategory['css-fingerprint']} CSS.supports probes` });
+  if (byCategory['offscreen-canvas'] > 0) threats.push({ type: 'OffscreenCanvas', severity: 'HIGH', detail: `${byCategory['offscreen-canvas']} OffscreenCanvas ops` });
+  if (byCategory['exfiltration'] > 0) threats.push({ type: 'Data Exfiltration', severity: 'CRITICAL', detail: `${byCategory['exfiltration']} exfiltration events` });
+  if (byCategory['honeypot'] > 0) threats.push({ type: '🍯 Honeypot Triggered', severity: 'CRITICAL', detail: `CONFIRMED fingerprinting — ${byCategory['honeypot']} trap accesses` });
+  if (byCategory['property-enum'] > 0) threats.push({ type: 'Prototype Inspection', severity: 'HIGH', detail: `${byCategory['property-enum']} property enumeration events` });
+  if (byCategory['credential'] > 0) threats.push({ type: 'Credential Probing', severity: 'CRITICAL', detail: `${byCategory['credential']} credential API calls` });
+  if (originSet.size > 3) threats.push({ type: 'Multi-Origin Tracking', severity: 'HIGH', detail: `${originSet.size} unique origins` });
+
+  for (const attr of correlation.attributions) {
+    threats.push({
+      type: `📚 Library: ${attr.library}`,
+      severity: 'CRITICAL',
+      detail: `${attr.confidence}% confidence — ${attr.description}`,
+      who: attr.library,
+      how: `Patterns: ${attr.matchedPatterns.join(', ')}`
+    });
   }
 
+  // Coverage Proof
+  const bootOkEvents = events.filter(e => e.api === 'BOOT_OK');
+  const monitoredFrames = bootOkEvents.map(e => ({
+    frameId: e.frameId,
+    origin: e.origin,
+    url: e.detail
+  }));
+
+  const coverageProof = {
+    totalFramesDetected: contextMap ? contextMap.length : 0,
+    monitoredFrames: monitoredFrames.length,
+    bootOkReceived: bootOkEvents.length,
+    coverage: contextMap && contextMap.length > 0
+      ? Math.round((Math.max(monitoredFrames.length, 1) / contextMap.length) * 100)
+      : 0,
+    unmonitoredFrames: contextMap
+      ? contextMap.filter(cm => !monitoredFrames.some(mf => mf.origin === cm.origin)).map(cm => cm.url || cm.origin || 'unknown')
+      : [],
+    verdict: bootOkEvents.length > 0 ? 'MONITORED' : 'BLIND_SPOT_DETECTED'
+  };
+
+  // 1H5W Forensic Summary
+  const topCats = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const firstEvent = events.length > 0 ? events.reduce((a, b) => a.ts < b.ts ? a : b) : null;
+  const lastEvent = events.length > 0 ? events.reduce((a, b) => a.ts > b.ts ? a : b) : null;
+  const duration = lastEvent && firstEvent ? ((lastEvent.ts - firstEvent.ts) / 1000).toFixed(1) : '0';
+  const libs = correlation.attributions.map(a => a.library).join(', ') || 'Unknown';
+
+  const forensic1H5W = {
+    WHO: libs !== 'Unknown'
+      ? `${libs} fingerprinting script(s)`
+      : events.length > 0 ? 'Unknown fingerprinting script(s)' : 'No scripts detected',
+    WHAT: events.length > 0
+      ? `${events.length} API calls across ${Object.keys(byCategory).length} categories (top: ${topCats.map(c => c[0]).join(', ')})`
+      : 'No API calls captured',
+    WHEN: events.length > 0
+      ? `${duration}s activity window (${firstEvent.ts}ms — ${lastEvent.ts}ms from page load)`
+      : 'No events captured',
+    WHERE: `${originSet.size} origin(s), ${frameSet.size} frame(s) — Coverage: ${coverageProof.coverage}%`,
+    WHY: threats.length > 0
+      ? threats.slice(0, 3).map(t => `${t.type} (${t.severity})`).join('; ')
+      : 'No threats detected',
+    HOW: events.length > 0
+      ? 'Multiple API probing across fingerprint vectors'
+      : 'No fingerprinting methods observed'
+  };
+
+  const categoriesMonitored = 31;
+
+  // Build Report JSON
   const reportJson = {
-    version: 'sentinel-v3.0.0',
+    version: 'sentinel-v4.1.0',
     target: targetUrl,
     scanDate: new Date().toISOString(),
     mode: options.stealthEnabled ? 'stealth' : 'observe',
     totalEvents: events.length,
     riskScore,
     riskLevel: riskScore >= 70 ? 'DANGER 🔴' : riskScore >= 40 ? 'WARNING 🟡' : 'LOW 🟢',
-    timeSpanMs: events.length > 0 ? events[events.length - 1].ts : 0,
+    categoriesDetected: Object.keys(byCategory).length,
+    categoriesMonitored,
     byCategory,
     byRisk,
     topApis,
     uniqueOrigins: [...originSet],
+    uniqueFrames: [...frameSet],
     threats,
-    categoriesMonitored: 18,
-    categoriesDetected: Object.keys(byCategory).length,
-    timeline: timelineSlots
+    correlation,
+    coverageProof,
+    forensic1H5W,
+    timeline: timelineSlots,
+    valueCaptures: valueCaptures.slice(0, 100),
+    events: events.slice(0, 5000)
   };
 
-  // ── Save JSON ──
+  // Save JSON
   const jsonPath = path.join(outputDir, `${prefix}_report.json`);
   fs.writeFileSync(jsonPath, JSON.stringify(reportJson, null, 2));
 
-  // ── Save Context Map ──
+  // Save Context Map
   const ctxPath = path.join(outputDir, `${prefix}_context-map.json`);
   fs.writeFileSync(ctxPath, JSON.stringify(contextMap || [], null, 2));
 
-  // ── Generate HTML ──
+  // Generate HTML Report
   const htmlPath = path.join(outputDir, `${prefix}_report.html`);
-  const html = generateHTML(reportJson, events);
+  const html = generateHTML(reportJson, targetUrl);
   fs.writeFileSync(htmlPath, html);
 
-  return { jsonPath, ctxPath, htmlPath, reportJson };
+  return { reportJson, jsonPath, htmlPath, ctxPath };
 }
 
-function generateHTML(report, events) {
-  const catRows = Object.entries(report.byCategory)
-    .sort((a, b) => b[1] - a[1])
-    .map(([cat, count]) => `<tr><td>${cat}</td><td>${count}</td><td>${getCatBadge(cat)}</td></tr>`)
-    .join('');
+function generateHTML(r, targetUrl) {
+  const threatRows = r.threats.map(t => {
+    const color = t.severity === 'CRITICAL' ? '#ff4444' : t.severity === 'HIGH' ? '#ffaa00' : '#4488ff';
+    return `<tr><td style="color:${color};font-weight:bold">${t.severity}</td><td>${t.type}</td><td>${t.detail}</td><td>${t.who || '-'}</td><td>${t.how || '-'}</td></tr>`;
+  }).join('');
 
-  const apiRows = report.topApis
-    .map(a => `<tr><td><code>${a.api}</code></td><td>${a.count}</td></tr>`)
-    .join('');
+  const catRows = Object.entries(r.byCategory).sort((a, b) => b[1] - a[1]).map(([cat, count]) =>
+    `<tr><td>${cat}</td><td>${count}</td></tr>`
+  ).join('');
 
-  const threatRows = report.threats
-    .map(t => `<tr class="threat-${t.severity.toLowerCase()}"><td>${t.type}</td><td><span class="badge badge-${t.severity.toLowerCase()}">${t.severity}</span></td><td>${t.detail}</td></tr>`)
-    .join('');
+  const apiRows = r.topApis.map(a => `<tr><td>${a.api}</td><td>${a.count}</td></tr>`).join('');
 
-  const riskClass = report.riskScore >= 70 ? 'danger' : report.riskScore >= 40 ? 'warning' : 'safe';
+  const valueRows = (r.valueCaptures || []).slice(0, 50).map(v =>
+    `<tr><td>${v.ts}ms</td><td>${v.api}</td><td>${v.category}</td><td style="max-width:400px;overflow:hidden;text-overflow:ellipsis">${String(v.value).replace(/</g,'&lt;').slice(0, 200)}</td></tr>`
+  ).join('');
+
+  const burstRows = (r.correlation?.bursts || []).map(b =>
+    `<tr><td>${b.startTs}-${b.endTs}ms</td><td>${b.count}</td><td>${b.durationMs}ms</td><td>${b.topCategory}</td><td>${b.isFingerprintBurst ? '✅ YES' : '❌ No'}</td></tr>`
+  ).join('');
+
+  const libRows = (r.correlation?.attributions || []).map(a =>
+    `<tr><td>${a.library}</td><td>${a.confidence}%</td><td>${a.matchedPatterns.join(', ')}</td><td>${a.burstCorrelation ? '✅' : '❌'}</td></tr>`
+  ).join('');
+
+  const timelineData = Object.entries(r.timeline || {}).sort((a, b) => parseInt(a[0]) - parseInt(b[0]));
+  const timelineBars = timelineData.map(([sec, count]) => {
+    const height = Math.min(count, 200);
+    return `<div style="display:inline-block;width:8px;height:${height}px;background:#00ff88;margin:0 1px;vertical-align:bottom" title="${sec}s: ${count} events"></div>`;
+  }).join('');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sentinel v3 — Maling Catcher Report</title>
+<title>Sentinel v4.1 Forensic Report — ${targetUrl}</title>
 <style>
-  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --danger: #f85149; --warning: #d29922; --safe: #3fb950; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; padding: 20px; }
-  .container { max-width: 1200px; margin: 0 auto; }
-  h1 { color: var(--accent); margin-bottom: 8px; font-size: 1.8rem; }
-  .subtitle { color: #8b949e; margin-bottom: 24px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-  .card h3 { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 8px; }
-  .card .value { font-size: 2rem; font-weight: bold; }
-  .card .value.danger { color: var(--danger); }
-  .card .value.warning { color: var(--warning); }
-  .card .value.safe { color: var(--safe); }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 24px; background: var(--card); border-radius: 8px; overflow: hidden; }
-  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
-  th { background: #21262d; color: var(--accent); font-size: 0.8rem; text-transform: uppercase; }
-  .badge { padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: bold; }
-  .badge-critical { background: #f8514933; color: var(--danger); }
-  .badge-high { background: #d2992233; color: var(--warning); }
-  .badge-medium { background: #58a6ff22; color: var(--accent); }
-  .badge-low { background: #3fb95022; color: var(--safe); }
-  .threat-critical { border-left: 3px solid var(--danger); }
-  .threat-high { border-left: 3px solid var(--warning); }
-  .threat-medium { border-left: 3px solid var(--accent); }
-  .section { margin-bottom: 32px; }
-  .section h2 { color: var(--accent); margin-bottom: 12px; font-size: 1.2rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-  .mode-badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; margin-left: 12px; }
-  .mode-stealth { background: #3fb95033; color: var(--safe); }
-  .mode-observe { background: #d2992233; color: var(--warning); }
-  .origin-list { display: flex; gap: 8px; flex-wrap: wrap; }
-  .origin-tag { background: #21262d; border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; }
-  footer { text-align: center; color: #484f58; margin-top: 40px; font-size: 0.8rem; }
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0a;color:#e0e0e0;padding:20px;line-height:1.6}
+h1{color:#00ff88;font-size:1.8em;margin-bottom:5px}
+h2{color:#00ccff;margin:25px 0 10px;border-bottom:1px solid #333;padding-bottom:5px}
+h3{color:#ffaa00;margin:15px 0 8px}
+.container{max-width:1400px;margin:0 auto}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin:20px 0}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:15px;text-align:center}
+.card .value{font-size:2em;font-weight:bold;color:#00ff88}
+.card .label{font-size:0.85em;color:#888;margin-top:5px}
+.risk-high .value{color:#ff4444}
+.risk-med .value{color:#ffaa00}
+table{width:100%;border-collapse:collapse;margin:10px 0;background:#111}
+th{background:#1a1a2e;color:#00ccff;text-align:left;padding:8px;border:1px solid #333}
+td{padding:6px 8px;border:1px solid #222;font-size:0.9em}
+tr:hover{background:#1a1a2e}
+.timeline{background:#111;border:1px solid #333;border-radius:8px;padding:15px;margin:15px 0;min-height:60px;display:flex;align-items:flex-end}
+.h5w{background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:15px;margin:15px 0}
+.h5w div{margin:5px 0}
+.h5w span.label{color:#00ccff;font-weight:bold;display:inline-block;width:80px}
+.coverage{padding:10px;border-radius:5px;margin:10px 0}
+.coverage-ok{background:#0a2a0a;border:1px solid #00ff88}
+.coverage-warn{background:#2a1a0a;border:1px solid #ffaa00}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.8em;font-weight:bold}
+.badge-critical{background:#ff4444;color:#fff}
+.badge-high{background:#ffaa00;color:#000}
+.badge-medium{background:#4488ff;color:#fff}
+.badge-low{background:#444;color:#ccc}
 </style>
 </head>
 <body>
 <div class="container">
-  <h1>🛡️ Sentinel v3 — Maling Catcher Report</h1>
-  <p class="subtitle">${report.target} <span class="mode-badge mode-${report.mode}">${report.mode.toUpperCase()} MODE</span></p>
+<h1>🛡️ SENTINEL v4.1 — FORENSIC REPORT</h1>
+<p style="color:#888">Target: <strong>${targetUrl}</strong> | Mode: <strong>${r.mode}</strong> | Scanned: ${r.scanDate}</p>
 
-  <div class="grid">
-    <div class="card"><h3>Risk Score</h3><div class="value ${riskClass}">${report.riskScore}/100</div><div>${report.riskLevel}</div></div>
-    <div class="card"><h3>Total Events</h3><div class="value">${report.totalEvents.toLocaleString()}</div></div>
-    <div class="card"><h3>Categories Detected</h3><div class="value">${report.categoriesDetected}/${report.categoriesMonitored}</div></div>
-    <div class="card"><h3>Unique Origins</h3><div class="value">${report.uniqueOrigins.length}</div></div>
-    <div class="card"><h3>Threats Found</h3><div class="value ${report.threats.length > 3 ? 'danger' : report.threats.length > 0 ? 'warning' : 'safe'}">${report.threats.length}</div></div>
-    <div class="card"><h3>Scan Duration</h3><div class="value">${(report.timeSpanMs / 1000).toFixed(1)}s</div></div>
+<div class="summary">
+  <div class="card ${r.riskScore >= 70 ? 'risk-high' : r.riskScore >= 40 ? 'risk-med' : ''}">
+    <div class="value">${r.riskScore}/100</div><div class="label">Risk Score</div>
   </div>
-
-  ${report.threats.length > 0 ? `
-  <div class="section">
-    <h2>🚨 Threat Assessment</h2>
-    <table><thead><tr><th>Threat</th><th>Severity</th><th>Detail</th></tr></thead><tbody>${threatRows}</tbody></table>
-  </div>` : ''}
-
-  <div class="section">
-    <h2>📊 Activity by Category</h2>
-    <table><thead><tr><th>Category</th><th>Events</th><th>Risk Level</th></tr></thead><tbody>${catRows}</tbody></table>
-  </div>
-
-  <div class="section">
-    <h2>🔍 Top APIs Called</h2>
-    <table><thead><tr><th>API</th><th>Count</th></tr></thead><tbody>${apiRows}</tbody></table>
-  </div>
-
-  <div class="section">
-    <h2>🌐 Origins Detected</h2>
-    <div class="origin-list">${report.uniqueOrigins.map(o => `<span class="origin-tag">${o}</span>`).join('')}</div>
-  </div>
-
-  <div class="section">
-    <h2>📈 Risk Breakdown</h2>
-    <div class="grid">
-      <div class="card"><h3>Critical</h3><div class="value danger">${report.byRisk.critical || 0}</div></div>
-      <div class="card"><h3>High</h3><div class="value warning">${report.byRisk.high || 0}</div></div>
-      <div class="card"><h3>Medium</h3><div class="value" style="color:var(--accent)">${report.byRisk.medium || 0}</div></div>
-      <div class="card"><h3>Low</h3><div class="value safe">${report.byRisk.low || 0}</div></div>
-    </div>
-  </div>
-
-  <footer>Sentinel v3.0.0 — Maling Catcher | Scan: ${report.scanDate}</footer>
+  <div class="card"><div class="value">${r.totalEvents}</div><div class="label">Total Events</div></div>
+  <div class="card"><div class="value">${r.categoriesDetected}/${r.categoriesMonitored}</div><div class="label">Categories</div></div>
+  <div class="card"><div class="value">${r.threats.length}</div><div class="label">Threats</div></div>
+  <div class="card"><div class="value">${r.uniqueOrigins.length}</div><div class="label">Origins</div></div>
+  <div class="card"><div class="value">${r.coverageProof?.coverage || 0}%</div><div class="label">Coverage</div></div>
 </div>
-</body></html>`;
-}
 
-function getCatBadge(cat) {
-  const map = {
-    'audio': '<span class="badge badge-critical">CRITICAL</span>',
-    'webrtc': '<span class="badge badge-critical">CRITICAL</span>',
-    'geolocation': '<span class="badge badge-critical">CRITICAL</span>',
-    'clipboard': '<span class="badge badge-critical">CRITICAL</span>',
-    'media-devices': '<span class="badge badge-critical">CRITICAL</span>',
-    'canvas': '<span class="badge badge-high">HIGH</span>',
-    'webgl': '<span class="badge badge-high">HIGH</span>',
-    'font-detection': '<span class="badge badge-high">HIGH</span>',
-    'fingerprint': '<span class="badge badge-high">HIGH</span>',
-    'math-fingerprint': '<span class="badge badge-high">HIGH</span>',
-    'permissions': '<span class="badge badge-high">HIGH</span>',
-    'service-worker': '<span class="badge badge-high">HIGH</span>',
-    'storage': '<span class="badge badge-medium">MEDIUM</span>',
-    'network': '<span class="badge badge-medium">MEDIUM</span>',
-    'screen': '<span class="badge badge-medium">MEDIUM</span>',
-    'perf-timing': '<span class="badge badge-medium">MEDIUM</span>',
-    'dom-probe': '<span class="badge badge-medium">MEDIUM</span>',
-    'hardware': '<span class="badge badge-medium">MEDIUM</span>',
-  };
-  return map[cat] || '<span class="badge badge-low">LOW</span>';
+<h2>🔍 Forensic 1H5W Analysis</h2>
+<div class="h5w">
+  <div><span class="label">👤 WHO:</span> ${r.forensic1H5W.WHO}</div>
+  <div><span class="label">📋 WHAT:</span> ${r.forensic1H5W.WHAT}</div>
+  <div><span class="label">⏱️ WHEN:</span> ${r.forensic1H5W.WHEN}</div>
+  <div><span class="label">📍 WHERE:</span> ${r.forensic1H5W.WHERE}</div>
+  <div><span class="label">❓ WHY:</span> ${r.forensic1H5W.WHY}</div>
+  <div><span class="label">🔧 HOW:</span> ${r.forensic1H5W.HOW}</div>
+</div>
+
+<div class="coverage ${r.coverageProof?.verdict === 'MONITORED' ? 'coverage-ok' : 'coverage-warn'}">
+  📡 Coverage: ${r.coverageProof?.verdict || 'UNKNOWN'} — ${r.coverageProof?.bootOkReceived || 0} BOOT_OK from ${r.coverageProof?.totalFramesDetected || 0} frames
+  ${r.coverageProof?.unmonitoredFrames?.length > 0 ? '<br>⚠️ Unmonitored: ' + r.coverageProof.unmonitoredFrames.slice(0, 5).join(', ') : ''}
+</div>
+
+<h2>📊 Event Timeline</h2>
+<div class="timeline">${timelineBars || '<span style="color:#666">No events to display</span>'}</div>
+
+${r.threats.length > 0 ? `
+<h2>🚨 Threats (${r.threats.length})</h2>
+<table><tr><th>Severity</th><th>Type</th><th>Detail</th><th>WHO</th><th>HOW</th></tr>${threatRows}</table>
+` : ''}
+
+${libRows ? `
+<h2>📚 Library Attribution</h2>
+<table><tr><th>Library</th><th>Confidence</th><th>Matched Patterns</th><th>Burst Match</th></tr>${libRows}</table>
+` : ''}
+
+${burstRows ? `
+<h2>💥 Burst Analysis</h2>
+<table><tr><th>Time Range</th><th>Events</th><th>Duration</th><th>Top Category</th><th>FP Burst?</th></tr>${burstRows}</table>
+` : ''}
+
+<h2>📂 Categories (${Object.keys(r.byCategory).length})</h2>
+<table><tr><th>Category</th><th>Events</th></tr>${catRows}</table>
+
+<h2>🔝 Top APIs</h2>
+<table><tr><th>API</th><th>Calls</th></tr>${apiRows}</table>
+
+${valueRows ? `
+<h2>🔬 Value Captures (top 50)</h2>
+<table><tr><th>Time</th><th>API</th><th>Category</th><th>Captured Value</th></tr>${valueRows}</table>
+` : ''}
+
+<h2>📈 Risk Distribution</h2>
+<table><tr><th>Level</th><th>Count</th></tr>
+<tr><td><span class="badge badge-critical">CRITICAL</span></td><td>${r.byRisk.critical}</td></tr>
+<tr><td><span class="badge badge-high">HIGH</span></td><td>${r.byRisk.high}</td></tr>
+<tr><td><span class="badge badge-medium">MEDIUM</span></td><td>${r.byRisk.medium}</td></tr>
+<tr><td><span class="badge badge-low">LOW</span></td><td>${r.byRisk.low}</td></tr>
+<tr><td>INFO</td><td>${r.byRisk.info}</td></tr>
+</table>
+
+<p style="margin-top:30px;color:#555;font-size:0.8em">Generated by Sentinel v4.1 — Forensic Maling Catcher | ${r.scanDate}</p>
+</div>
+</body>
+</html>`;
 }
 
 module.exports = { generateReport };
