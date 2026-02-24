@@ -1,12 +1,14 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "3.0.0",
-  "description": "Sentinel v3 \u2014 Browser Activity Viewer & Maling Catcher with Stealth Mode",
+  "version": "4.2.0",
+  "description": "Sentinel v4.2 — Zero Escape Forensic Browser Activity Viewer & Maling Catcher | 37 Categories | Triple Injection | Worker Monitoring | Adaptive Timeout",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "scan": "node index.js",
-    "dual": "node index.js --dual-mode"
+    "dual": "node index.js --dual-mode",
+    "stealth": "node index.js --stealth",
+    "observe": "node index.js --observe"
   },
   "dependencies": {
     "playwright-extra": "^4.3.6",
@@ -16,10 +18,8 @@
     "ora": "^5.4.1"
   },
   "keywords": [
-    "fingerprint",
-    "browser-security",
-    "stealth",
-    "sentinel"
+    "fingerprint", "browser-security", "stealth", "sentinel",
+    "forensic", "maling-catcher", "zero-escape", "1H5W"
   ],
   "license": "MIT"
 }

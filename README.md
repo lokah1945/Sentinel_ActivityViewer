@@ -1,116 +1,123 @@
-# 🛡️ Sentinel v3.0 — Maling Catcher
+# 🛡️ Sentinel Activity Viewer v4.2 — Forensic Maling Catcher
 
-**Browser Activity Viewer with Stealth Mode** — Detects and reports all fingerprinting, tracking, and suspicious browser API activity from any website.
+## Zero Escape Architecture | 37 Categories | 100% Detection Target
 
-## 🚀 Quick Start
+### What's New in v4.2
+
+**Architecture:**
+- Triple Injection System (CDP + addInitScript + per-target)
+- Adaptive Timeout: 60s default → up to 120s with automatic extension
+- Enhanced Deduplication: multi-factor key with 50ms sliding window
+- Final Flush + Grace Period: no events lost at scan end
+
+**Detection:**
+- 37 detection categories (31 fixed + 6 new)
+- WebAssembly fingerprinting detection (9 API hooks)
+- Keyboard Layout API detection (6 API hooks)
+- Device Sensor API detection (11 API hooks)
+- Visualization/GPU probing detection (7 API hooks)
+- Device Info harvesting detection (8 API hooks)
+- Enhanced Clipboard detection (7 API hooks)
+
+**Bug Fixes:**
+- [BUG-01] hookFn parameter order fixed — category/risk no longer swapped
+- [BUG-02] All 37 categories produce events (14 ghost hooks fixed)
+- [BUG-03/10] hashStr full FNV-1a incremental (no truncation)
+- [BUG-04] Timeout 30s → 60s default
+- [BUG-05] Dedup key enhanced with argHash + seqCounter
+- [BUG-06] Cross-origin iframe injection via CDP Target.setAutoAttach
+- [BUG-07] Final flush mechanism before browser close
+- [BUG-08] Worker content monitoring
+- [BUG-09] Anti-detection shield WeakMap + freeze
+- [BUG-10] hashStr processes entire string
+
+**Stealth:**
+- CreepJS lie detection countermeasures
+- CDP detection cleanup
+- Error.stack sanitization (removes Sentinel frames)
+- WebGL vendor/renderer consistency
+
+**Analysis:**
+- Cross-category correlation (FPv5 41-source sequence matching)
+- Temporal slow-probe detection
+- Worker event correlation
+- Cross-frame fingerprinting detection
+- Coverage matrix in reports
+
+### Installation
 
 ```bash
-# Install dependencies
 npm install
+```
 
-# Interactive mode (akan minta input URL)
-npm start
+### Usage
 
-# Quick scan dengan stealth (default)
-node index.js browserscan.net
+```bash
+# Quick scan (stealth mode, default)
+node index.js https://browserscan.net
 
-# Observe mode (tanpa stealth, deteksi mentah)
-node index.js browserscan.net --observe
+# Observe mode (no stealth plugins)
+node index.js https://browserscan.net --observe
 
-# Dual mode (jalankan kedua mode & bandingkan hasilnya)
-node index.js browserscan.net --dual-mode
+# Dual mode (compare stealth vs observe)
+node index.js https://browserscan.net --dual-mode
 
-# Custom timeout (default 30s)
-node index.js browserscan.net --timeout=45000
+# Custom timeout
+node index.js https://browserscan.net --timeout=90000
 
 # Headless mode
-node index.js browserscan.net --headless
+node index.js https://browserscan.net --headless
+
+# Full options
+node index.js https://example.com --stealth --timeout=60000 --headless --cdp
 ```
 
-## 🏗️ Architecture
+### Output
+
+Reports are saved to `./output/` directory:
+- `sentinel_*_report.json` — Full forensic data
+- `sentinel_*_report.html` — Interactive dashboard
+- `sentinel_*_context.json` — Frame context map
+
+### Architecture
 
 ```
-sentinel_v3/
-├── index.js                    # CLI entry point
-├── package.json
+Layer 1: CDP Injection (Page.addScriptToEvaluateOnNewDocument)
+Layer 2: addInitScript Backup  
+Layer 3: Per-Target CDP (cross-origin iframes + workers)
+Layer 4: Anti-Detection Shield (toString, descriptors, stack sanitization)
+Layer 5: Core + Extended Hooks (37 categories, tiered value capture)
+Layer 6: Behavior Correlation (bursts, slow-probes, cross-category, attribution)
+Layer 7: 1H5W Forensic Reporting (JSON + HTML dashboard)
+```
+
+### File Structure
+
+```
+sentinel_v42/
+├── index.js                          # Main orchestrator
+├── package.json                      # Dependencies
+├── README.md                         # This file
 ├── hooks/
-│   ├── stealth-config.js       # Stealth plugin + extra hardening
-│   └── api-interceptor.js      # 18-category API hook engine
+│   ├── api-interceptor.js            # 37-category forensic hooks
+│   ├── anti-detection-shield.js      # WeakMap-based stealth shield
+│   └── stealth-config.js             # CreepJS countermeasures
+├── lib/
+│   ├── correlation-engine.js         # Behavior analysis engine
+│   └── signature-db.js               # FPv5/CreepJS/WASM signatures
 ├── reporters/
-│   └── report-generator.js     # JSON + HTML + Context Map generator
-├── output/                     # Scan results saved here
-└── README.md
+│   └── report-generator.js           # 1H5W report generator
+└── output/                           # Generated reports
 ```
 
-## 🔍 18 Monitored Categories
+### Detection Coverage
 
-| Category | APIs Hooked | Risk |
-|----------|-------------|------|
-| Canvas | toDataURL, toBlob, getImageData, fillText, isPointInPath | 🔴 HIGH |
-| WebGL | getParameter, getExtension, getSupportedExtensions, getShaderPrecisionFormat, readPixels | 🔴 HIGH |
-| Audio | OfflineAudioContext, createOscillator, createDynamicsCompressor, createAnalyser, baseLatency | 🔴 CRITICAL |
-| Font Detection | measureText, document.fonts.check, getBoundingClientRect, offsetWidth | 🔴 HIGH |
-| Fingerprint | userAgent, platform, languages, hardwareConcurrency, deviceMemory, plugins, matchMedia | 🔴 HIGH |
-| Math Fingerprint | acos, acosh, asin, sinh, cos, tan, exp, expm1, log1p (15 functions) | 🟡 HIGH |
-| Permissions | navigator.permissions.query | 🔴 HIGH |
-| Storage | cookie get/set, localStorage, sessionStorage, indexedDB | 🟡 MEDIUM |
-| Screen | width, height, colorDepth, pixelDepth, availWidth, devicePixelRatio | 🟡 MEDIUM |
-| Network | fetch, XMLHttpRequest, sendBeacon | 🟡 MEDIUM |
-| WebRTC | RTCPeerConnection | 🔴 CRITICAL |
-| Performance | getEntries, getEntriesByType, performance.now | 🟡 MEDIUM |
-| Media Devices | enumerateDevices | 🔴 CRITICAL |
-| DOM Probe | createElement (canvas/iframe/audio/video) | 🟡 MEDIUM |
-| Clipboard | readText, writeText | 🔴 CRITICAL |
-| Geolocation | getCurrentPosition, watchPosition | 🔴 CRITICAL |
-| Service Worker | register | 🔴 HIGH |
-| Hardware | getBattery, timezone, architecture | 🟡 MEDIUM |
+- **FingerprintJS v5**: 41/41 entropy sources covered
+- **CreepJS**: 40/40 categories covered  
+- **WebAssembly FP**: Full coverage (compile, instantiate, Memory, Table)
+- **Cross-origin iframes**: CDP auto-attach coverage
+- **Web Workers**: Constructor interception + CDP attachment
 
-## 🥷 Stealth Mode
+### Version
 
-Stealth mode uses **17 evasion techniques** from `puppeteer-extra-plugin-stealth`:
-
-- `chrome.app` / `chrome.csi` / `chrome.loadTimes` / `chrome.runtime`
-- `navigator.webdriver` / `navigator.plugins` / `navigator.vendor` / `navigator.permissions` / `navigator.languages` / `navigator.hardwareConcurrency`
-- `user-agent-override` / `media.codecs`
-- `iframe.contentWindow` / `window.outerdimensions`
-- `webgl.vendor` / `sourceurl` / `defaultArgs`
-
-**Plus Extra Stealth Layer:**
-- Deep webdriver property cleanup
-- Permissions API spoofing
-- Chrome runtime emulation
-- Connection API spoofing
-- Stack trace cleanup (removes playwright/puppeteer traces)
-- Notification permission normalization
-
-## 🔄 Dual Mode
-
-Run `--dual-mode` to execute both STEALTH and OBSERVE scans, then compare:
-
-```
-  📊 DUAL MODE COMPARISON
-  Metric                    STEALTH         OBSERVE
-  ───────────────────────────────────────────────
-  Risk Score                62              48
-  Total Events              1247            869
-  Categories                14              9
-```
-
-This reveals whether the target website **behaves differently** when it detects automation.
-
-## 📊 Output
-
-Each scan generates 3 files in `./output/`:
-- `*_report.json` — Structured metrics, threats, risk score
-- `*_report.html` — Visual dashboard with threat assessment
-- `*_context-map.json` — Frame/origin hierarchy
-
-## ⚠️ FingerprintJS v5 Detection
-
-Sentinel v3 automatically detects the **FingerprintJS v5 signature** pattern:
-- Canvas `isPointInPath` + audio fingerprinting + font detection + math fingerprinting
-- Triggers a CRITICAL threat alert when detected
-
-## License
-
-MIT
+v4.2.0 — Zero Escape Architecture
