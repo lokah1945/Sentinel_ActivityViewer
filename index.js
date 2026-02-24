@@ -1,292 +1,404 @@
-#!/usr/bin/env node
 /**
- * ╔═══════════════════════════════════════════════════════╗
- * ║   SENTINEL v3.0 — MALING CATCHER                     ║
- * ║   Browser Activity Viewer with Stealth Mode           ║
- * ╚═══════════════════════════════════════════════════════╝
+ * Sentinel Activity Viewer — V4.3
+ * Zero Escape Architecture — Forensic Browser Fingerprint Detector
  *
- * Usage:
- *   node index.js                        — Interactive mode
- *   node index.js <url>                  — Quick scan
- *   node index.js <url> --stealth        — Stealth mode (default)
- *   node index.js <url> --observe        — Observe mode (no stealth)
- *   node index.js <url> --dual-mode      — Run BOTH modes & compare
- *   node index.js <url> --timeout=45000  — Custom timeout (ms)
- *   node index.js <url> --headless       — Headless mode
+ * ARCHITECTURE:
+ *   Layer 1: Injection (CDP-primary, addInitScript-fallback — NOT both)
+ *   Layer 2: Anti-Detection Shield (WeakMap descriptor cache)
+ *   Layer 3: API Interceptor (200+ hooks, 37 categories)
+ *   Layer 4: Stealth Config (counter-fingerprinting)
+ *   Layer 5: Correlation Engine (burst/slow-probe/attribution)
+ *   Layer 6: Signature DB (FPv5, CreepJS detection)
+ *   Layer 7: Report Generator (JSON + HTML + 1H5W)
+ *
+ * CRITICAL FIX from v4.2.1:
+ *   - Bug #8: Descriptor cache now target-qualified (WeakMap)
+ *   - CDP + addInitScript are either/or (not both)
+ *   - Error.prepareStackTrace cleanup restored
+ *   - Object.getOwnPropertyDescriptors protection restored
  */
 
-const { createStealthPlugin, getExtraStealthScript } = require('./hooks/stealth-config');
-const { getInterceptorScript } = require('./hooks/api-interceptor');
-const { generateReport } = require('./reporters/report-generator');
-const readline = require('readline');
-const path = require('path');
+var playwright = require('playwright');
+var path = require('path');
+var stealthConfig = require('./hooks/stealth-config');
+var antiDetectionShield = require('./hooks/anti-detection-shield');
+var apiInterceptor = require('./hooks/api-interceptor');
+var reportGenerator = require('./reporters/report-generator');
 
-// ── Parse CLI arguments ──
-const args = process.argv.slice(2);
-const flags = {};
-let targetUrl = null;
+// ── CLI Argument Parsing ──
+function parseArgs() {
+  var args = process.argv.slice(2);
+  var config = {
+    url: '',
+    mode: 'observe',
+    timeout: 60000,
+    maxTimeout: 120000,
+    outputDir: path.join(__dirname, 'output'),
+    headless: true
+  };
 
-for (const arg of args) {
-  if (arg.startsWith('--')) {
-    const [key, val] = arg.slice(2).split('=');
-    flags[key] = val || true;
-  } else if (!targetUrl) {
-    targetUrl = arg;
+  for (var i = 0; i < args.length; i++) {
+    if (args[i] === '--url' && args[i + 1]) config.url = args[++i];
+    else if (args[i] === '--mode' && args[i + 1]) config.mode = args[++i];
+    else if (args[i] === '--timeout' && args[i + 1]) config.timeout = parseInt(args[++i], 10);
+    else if (args[i] === '--max-timeout' && args[i + 1]) config.maxTimeout = parseInt(args[++i], 10);
+    else if (args[i] === '--output' && args[i + 1]) config.outputDir = args[++i];
+    else if (args[i] === '--headless') config.headless = args[i + 1] !== 'false';
+    else if (args[i] === '--no-headless') config.headless = false;
   }
+
+  config.stealthEnabled = config.mode === 'stealth';
+  return config;
 }
 
-const TIMEOUT = parseInt(flags.timeout) || 30000;
-const HEADLESS = flags.headless === true || flags.headless === 'true';
-const DUAL_MODE = flags['dual-mode'] === true;
-const STEALTH_MODE = flags.observe ? false : true; // stealth is default
+// ── Build combined injection script ──
+function buildInjectionPayload(stealthEnabled) {
+  var parts = [];
 
-function normalizeUrl(input) {
-  input = input.trim();
-  if (!input.match(/^https?:\/\//i)) {
-    input = 'https://' + input;
-  }
-  return input;
-}
+  // Anti-detection shield (always first)
+  var shieldFn = antiDetectionShield.getAntiDetectionShield();
+  parts.push('(' + shieldFn.toString() + ')();');
 
-async function prompt(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => {
-    rl.question(question, answer => {
-      rl.close();
-      resolve(answer.trim());
-    });
+  // API interceptor
+  var interceptorScript = apiInterceptor.getInterceptorScript({
+    stealthEnabled: stealthEnabled
   });
+  parts.push(interceptorScript);
+
+  return parts.join('\n\n');
 }
 
-async function runScan(url, options = {}) {
-  const stealthEnabled = options.stealth !== false;
-  const label = stealthEnabled ? '🥷 STEALTH' : '👁️ OBSERVE';
-
-  console.log(`\n${'═'.repeat(60)}`);
-  console.log(`  ${label} MODE — Scanning: ${url}`);
-  console.log(`  Timeout: ${TIMEOUT / 1000}s | Headless: ${HEADLESS}`);
-  console.log(`${'═'.repeat(60)}\n`);
-
-  let browser, page;
-
-  try {
-    if (stealthEnabled) {
-      // Use playwright-extra with stealth
-      const { chromium } = require('playwright-extra');
-      const stealthPlugin = createStealthPlugin();
-      chromium.use(stealthPlugin);
-
-      browser = await chromium.launch({
-        headless: HEADLESS,
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-web-security',
-          '--no-first-run',
-          '--no-default-browser-check',
-        ]
-      });
-
-      const context = await browser.newContext({
-        viewport: { width: 1920, height: 1080 },
-        locale: 'en-US',
-        timezoneId: 'Asia/Jakarta',
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        permissions: [],
-        colorScheme: 'light',
-      });
-
-      page = await context.newPage();
-
-      // Inject extra stealth BEFORE any page load
-      await page.addInitScript(getExtraStealthScript());
-
-    } else {
-      // Plain playwright — observe mode (more detectable, shows raw behavior)
-      const { chromium } = require('playwright');
-
-      browser = await chromium.launch({
-        headless: HEADLESS,
-      });
-
-      const context = await browser.newContext({
-        viewport: { width: 1920, height: 1080 },
-      });
-
-      page = await context.newPage();
-    }
-
-    // Inject API interceptor BEFORE page navigation
-    await page.addInitScript(getInterceptorScript({ timeout: TIMEOUT }));
-
-    // Also inject into all frames
-    page.on('frameattached', async (frame) => {
-      try {
-        await frame.evaluate(getInterceptorScript({ timeout: TIMEOUT }));
-      } catch (e) { /* cross-origin frames will fail — expected */ }
-    });
-
-    console.log('🌐 Navigating to target...');
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUT
-    });
-
-    console.log('⏳ Observing activity...');
-
-    // Wait for the configured timeout to collect events
-    const observeTime = Math.max(TIMEOUT - 5000, 10000);
-    await page.waitForTimeout(observeTime);
-
-    // Scroll to trigger lazy-loaded fingerprinting scripts
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight / 2);
-    });
-    await page.waitForTimeout(3000);
-
-    // Collect results
-    console.log('📊 Collecting results...');
-
-    const sentinelData = await page.evaluate(() => {
-      return window.__SENTINEL_DATA__ || { events: [] };
-    });
-
-    const contextMap = await page.evaluate(() => {
-      return window.__SENTINEL_CONTEXT_MAP__ || [];
-    });
-
-    // Also collect frame information
-    const frames = page.frames();
-    const frameInfo = frames.map(f => ({
-      type: 'frame',
-      url: f.url(),
-      name: f.name() || '',
-    }));
-
-    const fullContextMap = [...(contextMap || []), ...frameInfo];
-
-    console.log(`\n✅ Scan complete! Captured ${sentinelData.events?.length || 0} events\n`);
-
-    // Generate report
-    const reportResult = generateReport(sentinelData, fullContextMap, url, {
-      stealthEnabled,
-      prefix: `sentinel_${stealthEnabled ? 'stealth' : 'observe'}_${Date.now()}`
-    });
-
-    // Print summary
-    const r = reportResult.reportJson;
-    console.log('┌─────────────────────────────────────────┐');
-    console.log(`│  Risk Score: ${r.riskScore}/100 ${r.riskLevel.padEnd(15)} │`);
-    console.log(`│  Events: ${String(r.totalEvents).padEnd(10)} Categories: ${String(r.categoriesDetected).padEnd(4)}│`);
-    console.log(`│  Origins: ${String(r.uniqueOrigins.length).padEnd(9)} Threats: ${String(r.threats.length).padEnd(6)}│`);
-    console.log('└─────────────────────────────────────────┘');
-
-    if (r.threats.length > 0) {
-      console.log('\n🚨 THREATS DETECTED:');
-      for (const t of r.threats) {
-        const icon = t.severity === 'CRITICAL' ? '🔴' : t.severity === 'HIGH' ? '🟡' : '🔵';
-        console.log(`  ${icon} [${t.severity}] ${t.type}`);
-        console.log(`     └─ ${t.detail}`);
-      }
-    }
-
-    console.log(`\n📁 Reports saved:`);
-    console.log(`   JSON: ${reportResult.jsonPath}`);
-    console.log(`   HTML: ${reportResult.htmlPath}`);
-    console.log(`   CTX:  ${reportResult.ctxPath}`);
-
-    return reportResult;
-
-  } catch (err) {
-    console.error('❌ Scan error:', err.message);
-    throw err;
-  } finally {
-    if (browser) {
-      await browser.close();
-      console.log('🔒 Browser closed.\n');
-    }
-  }
+// ── Build stealth-only script (for addInitScript) ──
+function buildStealthPayload() {
+  return stealthConfig.getExtraStealthScript();
 }
 
-async function runDualMode(url) {
-  console.log('\n' + '🔄 DUAL MODE — Running both STEALTH and OBSERVE scans...\n');
-
-  let stealthResult, observeResult;
-
-  try {
-    stealthResult = await runScan(url, { stealth: true });
-  } catch (e) {
-    console.error('Stealth scan failed:', e.message);
-  }
-
-  try {
-    observeResult = await runScan(url, { stealth: false });
-  } catch (e) {
-    console.error('Observe scan failed:', e.message);
-  }
-
-  if (stealthResult && observeResult) {
-    const s = stealthResult.reportJson;
-    const o = observeResult.reportJson;
-
-    console.log('\n' + '═'.repeat(60));
-    console.log('  📊 DUAL MODE COMPARISON');
-    console.log('═'.repeat(60));
-    console.log(`  ${'Metric'.padEnd(25)} ${'STEALTH'.padEnd(15)} ${'OBSERVE'.padEnd(15)}`);
-    console.log(`  ${'─'.repeat(55)}`);
-    console.log(`  ${'Risk Score'.padEnd(25)} ${String(s.riskScore).padEnd(15)} ${String(o.riskScore).padEnd(15)}`);
-    console.log(`  ${'Total Events'.padEnd(25)} ${String(s.totalEvents).padEnd(15)} ${String(o.totalEvents).padEnd(15)}`);
-    console.log(`  ${'Categories'.padEnd(25)} ${String(s.categoriesDetected).padEnd(15)} ${String(o.categoriesDetected).padEnd(15)}`);
-    console.log(`  ${'Origins'.padEnd(25)} ${String(s.uniqueOrigins.length).padEnd(15)} ${String(o.uniqueOrigins.length).padEnd(15)}`);
-    console.log(`  ${'Threats'.padEnd(25)} ${String(s.threats.length).padEnd(15)} ${String(o.threats.length).padEnd(15)}`);
-
-    // Show categories unique to each mode
-    const sCats = new Set(Object.keys(s.byCategory));
-    const oCats = new Set(Object.keys(o.byCategory));
-    const onlyInStealth = [...sCats].filter(c => !oCats.has(c));
-    const onlyInObserve = [...oCats].filter(c => !sCats.has(c));
-
-    if (onlyInStealth.length > 0) {
-      console.log(`\n  📌 Only in STEALTH: ${onlyInStealth.join(', ')}`);
-    }
-    if (onlyInObserve.length > 0) {
-      console.log(`  📌 Only in OBSERVE: ${onlyInObserve.join(', ')}`);
-    }
-
-    const delta = s.totalEvents - o.totalEvents;
-    if (Math.abs(delta) > 50) {
-      console.log(`\n  ⚠️  Significant delta: ${delta > 0 ? '+' : ''}${delta} events`);
-      console.log(`     Website likely behaves differently based on automation detection.`);
-    }
-
-    console.log('\n' + '═'.repeat(60));
-  }
+// ── Adaptive Timeout Logic ──
+function AdaptiveTimeout(baseMs, maxMs) {
+  this.baseMs = baseMs;
+  this.maxMs = maxMs;
+  this.lastEventCount = 0;
+  this.extensions = 0;
+  this.maxExtensions = 3;
+  this.extensionMs = 15000;
+  this.extended = false;
+  this.finalTimeout = baseMs;
 }
 
-// ── Main ──
-(async () => {
-  console.log(`
-  ╔═══════════════════════════════════════════════════╗
-  ║   🛡️  SENTINEL v3.0 — MALING CATCHER             ║
-  ║   Browser Activity Viewer with Stealth Mode       ║
-  ║   18 API categories | Threat detection            ║
-  ╚═══════════════════════════════════════════════════╝
-  `);
-
-  if (!targetUrl) {
-    targetUrl = await prompt('🎯 Target website (e.g. browserscan.net): ');
+AdaptiveTimeout.prototype.checkAndExtend = function(currentEventCount) {
+  if (this.extensions >= this.maxExtensions) return false;
+  if (currentEventCount > this.lastEventCount + 20) {
+    this.extensions++;
+    this.finalTimeout = Math.min(this.finalTimeout + this.extensionMs, this.maxMs);
+    this.lastEventCount = currentEventCount;
+    this.extended = true;
+    console.log('  [ADAPTIVE] Timeout extended to ' + (this.finalTimeout / 1000) + 's (extension ' + this.extensions + '/' + this.maxExtensions + ')');
+    return true;
   }
+  return false;
+};
 
-  if (!targetUrl) {
-    console.log('No target specified. Exiting.');
+// ── Main Execution ──
+async function main() {
+  var config = parseArgs();
+
+  if (!config.url) {
+    console.log('Usage: node index.js --url <target-url> [--mode observe|stealth] [--timeout ms]');
+    console.log('');
+    console.log('Options:');
+    console.log('  --url          Target URL to analyze (required)');
+    console.log('  --mode         observe or stealth (default: observe)');
+    console.log('  --timeout      Base timeout in ms (default: 60000)');
+    console.log('  --max-timeout  Max adaptive timeout (default: 120000)');
+    console.log('  --output       Output directory (default: ./output)');
+    console.log('  --headless     Run headless (default: true)');
+    console.log('  --no-headless  Show browser window');
     process.exit(1);
   }
 
-  const url = normalizeUrl(targetUrl);
+  console.log('');
+  console.log('=================================================');
+  console.log('  Sentinel Activity Viewer v4.3');
+  console.log('  Zero Escape Architecture — 37 Categories');
+  console.log('=================================================');
+  console.log('');
+  console.log('  Target:   ' + config.url);
+  console.log('  Mode:     ' + config.mode.toUpperCase());
+  console.log('  Timeout:  ' + (config.timeout / 1000) + 's (max ' + (config.maxTimeout / 1000) + 's)');
+  console.log('  Headless: ' + config.headless);
+  console.log('  Output:   ' + config.outputDir);
+  console.log('');
 
-  if (DUAL_MODE) {
-    await runDualMode(url);
-  } else {
-    await runScan(url, { stealth: STEALTH_MODE });
+  var browser = null;
+  var contextMap = [];
+
+  try {
+    // ── Launch Browser ──
+    console.log('[1/7] Launching browser...');
+    browser = await playwright.chromium.launch({
+      headless: config.headless,
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-site-isolation-trials',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage'
+      ]
+    });
+
+    var context = await browser.newContext({
+      viewport: { width: 1920, height: 1080 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      locale: 'en-US',
+      timezoneId: 'America/New_York',
+      permissions: [],
+      javaScriptEnabled: true,
+      ignoreHTTPSErrors: true
+    });
+
+    var page = await context.newPage();
+
+    // ── Build Injection Payloads ──
+    console.log('[2/7] Building injection payloads...');
+    var mainPayload = buildInjectionPayload(config.stealthEnabled);
+    var stealthPayload = config.stealthEnabled ? buildStealthPayload() : '';
+
+    // ── Layer 1: Try CDP injection (primary) ──
+    console.log('[3/7] Injecting via CDP (primary)...');
+    var cdpSession = null;
+    var cdpSuccess = false;
+    var injectionFlags = { L1: false, L2: false, L3: false };
+
+    try {
+      cdpSession = await page.context().newCDPSession(page);
+
+      // Enable Target domain for auto-attach
+      await cdpSession.send('Target.setAutoAttach', {
+        autoAttach: true,
+        waitForDebuggerOnStart: false,
+        flatten: true
+      });
+
+      // Inject main payload via CDP
+      await cdpSession.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: mainPayload,
+        runImmediately: false
+      });
+
+      cdpSuccess = true;
+      injectionFlags.L1 = true;
+      console.log('  [CDP] Main payload injected successfully');
+
+      // Handle auto-attached targets (iframes, workers)
+      cdpSession.on('Target.attachedToTarget', async function(params) {
+        var sessionId = params.sessionId;
+        var targetInfo = params.targetInfo;
+
+        if (targetInfo.type === 'iframe' || targetInfo.type === 'page') {
+          contextMap.push({
+            type: targetInfo.type,
+            url: targetInfo.url,
+            origin: targetInfo.url ? new URL(targetInfo.url).origin : 'unknown',
+            sessionId: sessionId
+          });
+
+          try {
+            await cdpSession.send('Page.addScriptToEvaluateOnNewDocument', {
+              source: mainPayload,
+              runImmediately: false
+            }, sessionId);
+            injectionFlags.L3 = true;
+            console.log('  [CDP] Per-target injection: ' + targetInfo.url.slice(0, 60));
+          } catch (e) {
+            console.log('  [CDP] Per-target injection failed for: ' + targetInfo.url.slice(0, 60));
+          }
+        }
+
+        // Resume target
+        try {
+          await cdpSession.send('Runtime.runIfWaitingForDebugger', {}, sessionId);
+        } catch (e) {}
+      });
+
+    } catch (cdpErr) {
+      console.log('  [CDP] Failed: ' + cdpErr.message.slice(0, 80));
+      console.log('  [CDP] Falling back to addInitScript...');
+    }
+
+    // ── Layer 2: Fallback to addInitScript (ONLY if CDP failed) ──
+    if (!cdpSuccess) {
+      console.log('[3/7] Injecting via addInitScript (fallback)...');
+      await page.addInitScript(mainPayload);
+      injectionFlags.L2 = true;
+      console.log('  [addInitScript] Main payload injected');
+    }
+
+    // ── Stealth scripts always via addInitScript (separate from main payload) ──
+    if (config.stealthEnabled && stealthPayload) {
+      await page.addInitScript(stealthPayload);
+      console.log('  [addInitScript] Stealth payload injected');
+    }
+
+    // ── Navigate to target ──
+    console.log('[4/7] Navigating to target...');
+    try {
+      await page.goto(config.url, {
+        waitUntil: 'networkidle',
+        timeout: 30000
+      });
+    } catch (navErr) {
+      console.log('  [NAV] Initial load timeout, continuing with domcontentloaded...');
+      try {
+        await page.goto(config.url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 15000
+        });
+      } catch (navErr2) {
+        console.log('  [NAV] Fallback navigation also failed: ' + navErr2.message.slice(0, 60));
+      }
+    }
+
+    console.log('  Page loaded: ' + page.url());
+
+    // ── Adaptive Timeout: Observe Activity ──
+    console.log('[5/7] Observing activity (timeout: ' + (config.timeout / 1000) + 's)...');
+    var adaptiveTimeout = new AdaptiveTimeout(config.timeout, config.maxTimeout);
+
+    var checkInterval = 5000;
+    var elapsed = 0;
+
+    while (elapsed < adaptiveTimeout.finalTimeout) {
+      await new Promise(function(resolve) { setTimeout(resolve, checkInterval); });
+      elapsed += checkInterval;
+
+      // Check event count for adaptive extension
+      try {
+        var countResult = await page.evaluate(function() {
+          if (typeof window.__SENTINEL_FLUSH__ === 'function') {
+            var data = JSON.parse(window.__SENTINEL_FLUSH__());
+            return data.events.length;
+          }
+          return 0;
+        });
+        adaptiveTimeout.checkAndExtend(countResult);
+
+        if (elapsed % 15000 < checkInterval) {
+          console.log('  [' + (elapsed / 1000) + 's] Events: ' + countResult);
+        }
+      } catch (e) {}
+    }
+
+    // ── Collect Results ──
+    console.log('[6/7] Collecting results...');
+    var sentinelData = { events: [], injectionFlags: injectionFlags, dedupStats: null };
+
+    try {
+      var flushResult = await page.evaluate(function() {
+        if (typeof window.__SENTINEL_FLUSH__ === 'function') {
+          return window.__SENTINEL_FLUSH__();
+        }
+        return JSON.stringify({ events: [], dedupStats: { totalReceived: 0, deduplicated: 0, kept: 0 } });
+      });
+
+      var parsed = JSON.parse(flushResult);
+      sentinelData.events = parsed.events || [];
+      sentinelData.dedupStats = parsed.dedupStats || null;
+    } catch (e) {
+      console.log('  [FLUSH] Error collecting from main frame: ' + e.message.slice(0, 80));
+    }
+
+    // Collect from child frames
+    var frames = page.frames();
+    for (var fi = 0; fi < frames.length; fi++) {
+      var frame = frames[fi];
+      if (frame === page.mainFrame()) continue;
+
+      try {
+        var frameResult = await frame.evaluate(function() {
+          if (typeof window.__SENTINEL_FLUSH__ === 'function') {
+            return window.__SENTINEL_FLUSH__();
+          }
+          return null;
+        });
+
+        if (frameResult) {
+          var frameParsed = JSON.parse(frameResult);
+          var frameEvents = frameParsed.events || [];
+
+          // Tag events with frame info
+          for (var fe = 0; fe < frameEvents.length; fe++) {
+            frameEvents[fe].frameId = 'frame_' + fi;
+            frameEvents[fe].frameUrl = frame.url();
+          }
+
+          // Non-destructive: push each event individually
+          for (var fe2 = 0; fe2 < frameEvents.length; fe2++) {
+            sentinelData.events.push(frameEvents[fe2]);
+          }
+
+          contextMap.push({
+            type: 'iframe',
+            url: frame.url(),
+            origin: frame.url() ? new URL(frame.url()).origin : 'unknown',
+            eventCount: frameEvents.length
+          });
+
+          console.log('  [FRAME] ' + frame.url().slice(0, 60) + ' — ' + frameEvents.length + ' events');
+        }
+      } catch (e) {}
+    }
+
+    // Sort all events by timestamp
+    sentinelData.events.sort(function(a, b) { return a.ts - b.ts; });
+
+    console.log('');
+    console.log('  Total events collected: ' + sentinelData.events.length);
+    console.log('  Frames detected: ' + contextMap.length);
+    console.log('');
+
+    // ── Generate Report ──
+    console.log('[7/7] Generating forensic report...');
+    var reportResult = reportGenerator.generateReport(
+      sentinelData,
+      contextMap,
+      config.url,
+      {
+        stealthEnabled: config.stealthEnabled,
+        outputDir: config.outputDir,
+        timeoutExtended: adaptiveTimeout.extended,
+        finalTimeout: adaptiveTimeout.finalTimeout
+      }
+    );
+
+    console.log('');
+    console.log('=================================================');
+    console.log('  SCAN COMPLETE');
+    console.log('=================================================');
+    console.log('  Events:     ' + sentinelData.events.length);
+    console.log('  Risk Score: ' + reportResult.reportJson.riskScore + '/100 ' + reportResult.reportJson.riskLevel);
+    console.log('  Threats:    ' + reportResult.reportJson.threats.length);
+    console.log('  Categories: ' + reportResult.reportJson.categoriesDetected + '/' + reportResult.reportJson.categoriesMonitored);
+    console.log('  Coverage:   ' + reportResult.reportJson.coveragePercent + '%');
+    console.log('');
+    console.log('  Reports:');
+    console.log('    JSON: ' + reportResult.jsonPath);
+    console.log('    HTML: ' + reportResult.htmlPath);
+    console.log('    CTX:  ' + reportResult.ctxPath);
+    console.log('=================================================');
+
+  } catch (err) {
+    console.error('FATAL ERROR: ' + err.message);
+    console.error(err.stack);
+    process.exit(1);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
-})();
+}
+
+main().catch(function(err) {
+  console.error('Unhandled error: ' + err.message);
+  process.exit(1);
+});

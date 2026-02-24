@@ -1,116 +1,99 @@
-# 🛡️ Sentinel v3.0 — Maling Catcher
+# Sentinel Activity Viewer — V4.3
 
-**Browser Activity Viewer with Stealth Mode** — Detects and reports all fingerprinting, tracking, and suspicious browser API activity from any website.
+**Zero Escape Architecture — Forensic Browser Fingerprint Detector**
 
-## 🚀 Quick Start
+## Overview
+
+Sentinel v4.3 is a Playwright-based browser fingerprinting detection tool that intercepts, monitors, and reports on all JavaScript API calls used for browser fingerprinting. It provides comprehensive forensic analysis with 1H5W (Who/What/When/Where/Why/How) methodology.
+
+### Version History
+| Version | Key Changes |
+|---------|-------------|
+| v3 | Foundation — 1,142 events, 12/18 categories, basic observe/stealth |
+| v4 | 7-layer architecture, 31 categories, CDP injection, BOOT_OK protocol |
+| v4.1 | Forensic analysis, correlation engine |
+| v4.2 | 37 categories, triple injection, adaptive timeout |
+| v4.2.1 | Bug fixes (7 bugs patched) |
+| **v4.3** | **Clean rebuild. Fixes Bug #8 (descriptor cache) that broke Vue/Nuxt sites** |
+
+## Critical Fix: Bug #8 (Descriptor Cache)
+
+v4.2.1's anti-detection-shield used `_descCache["" + prop]` — an unqualified property name as cache key. This caused `Object.getOwnPropertyDescriptor(anyObject, prop)` to return **wrong cached descriptors** for ANY object, breaking Vue 3 / Nuxt 3 reactivity systems.
+
+**Symptom**: "500 Couldn't resolve component 'default'" error on browserscan.net (Nuxt 3 site).
+
+**Fix**: WeakMap-based target-qualified descriptor cache. Key format = `targetId:prop`.
+
+## Architecture
+
+```
+Layer 1: Injection       — CDP / addInitScript (either/or, not both)
+Layer 2: Anti-Detection  — WeakMap descriptor cache, Error stack cleanup
+Layer 3: API Intercept   — 200+ API hooks, non-destructive push, BOOT_OK
+Layer 4: Stealth Config  — Counter-fingerprinting measures
+Layer 5: Correlation     — Burst detection, library attribution, slow-probe
+Layer 6: Signature DB    — FPv5, CreepJS, custom pattern matching
+Layer 7: Reporting       — JSON + HTML forensic report, 1H5W, coverage matrix
+```
+
+## File Structure
+
+```
+sentinel-activity-viewer/
+├── package.json
+├── .gitignore
+├── README.md
+├── index.js                        # Main entry point
+├── hooks/
+│   ├── anti-detection-shield.js    # WeakMap descriptor cache (Bug #8 fix)
+│   ├── api-interceptor.js          # 200+ API hooks, 37 categories
+│   └── stealth-config.js           # Counter-fingerprinting
+├── lib/
+│   ├── signature-db.js             # FPv5/CreepJS signatures
+│   └── correlation-engine.js       # Burst/attribution/slow-probe
+└── reporters/
+    └── report-generator.js         # JSON + HTML forensic report
+```
+
+## Installation
 
 ```bash
-# Install dependencies
 npm install
-
-# Interactive mode (akan minta input URL)
-npm start
-
-# Quick scan dengan stealth (default)
-node index.js browserscan.net
-
-# Observe mode (tanpa stealth, deteksi mentah)
-node index.js browserscan.net --observe
-
-# Dual mode (jalankan kedua mode & bandingkan hasilnya)
-node index.js browserscan.net --dual-mode
-
-# Custom timeout (default 30s)
-node index.js browserscan.net --timeout=45000
-
-# Headless mode
-node index.js browserscan.net --headless
 ```
 
-## 🏗️ Architecture
+## Usage
 
-```
-sentinel_v3/
-├── index.js                    # CLI entry point
-├── package.json
-├── hooks/
-│   ├── stealth-config.js       # Stealth plugin + extra hardening
-│   └── api-interceptor.js      # 18-category API hook engine
-├── reporters/
-│   └── report-generator.js     # JSON + HTML + Context Map generator
-├── output/                     # Scan results saved here
-└── README.md
+### Observe Mode (Monitor Only)
+```bash
+node index.js --url https://browserscan.net --mode observe
 ```
 
-## 🔍 18 Monitored Categories
-
-| Category | APIs Hooked | Risk |
-|----------|-------------|------|
-| Canvas | toDataURL, toBlob, getImageData, fillText, isPointInPath | 🔴 HIGH |
-| WebGL | getParameter, getExtension, getSupportedExtensions, getShaderPrecisionFormat, readPixels | 🔴 HIGH |
-| Audio | OfflineAudioContext, createOscillator, createDynamicsCompressor, createAnalyser, baseLatency | 🔴 CRITICAL |
-| Font Detection | measureText, document.fonts.check, getBoundingClientRect, offsetWidth | 🔴 HIGH |
-| Fingerprint | userAgent, platform, languages, hardwareConcurrency, deviceMemory, plugins, matchMedia | 🔴 HIGH |
-| Math Fingerprint | acos, acosh, asin, sinh, cos, tan, exp, expm1, log1p (15 functions) | 🟡 HIGH |
-| Permissions | navigator.permissions.query | 🔴 HIGH |
-| Storage | cookie get/set, localStorage, sessionStorage, indexedDB | 🟡 MEDIUM |
-| Screen | width, height, colorDepth, pixelDepth, availWidth, devicePixelRatio | 🟡 MEDIUM |
-| Network | fetch, XMLHttpRequest, sendBeacon | 🟡 MEDIUM |
-| WebRTC | RTCPeerConnection | 🔴 CRITICAL |
-| Performance | getEntries, getEntriesByType, performance.now | 🟡 MEDIUM |
-| Media Devices | enumerateDevices | 🔴 CRITICAL |
-| DOM Probe | createElement (canvas/iframe/audio/video) | 🟡 MEDIUM |
-| Clipboard | readText, writeText | 🔴 CRITICAL |
-| Geolocation | getCurrentPosition, watchPosition | 🔴 CRITICAL |
-| Service Worker | register | 🔴 HIGH |
-| Hardware | getBattery, timezone, architecture | 🟡 MEDIUM |
-
-## 🥷 Stealth Mode
-
-Stealth mode uses **17 evasion techniques** from `puppeteer-extra-plugin-stealth`:
-
-- `chrome.app` / `chrome.csi` / `chrome.loadTimes` / `chrome.runtime`
-- `navigator.webdriver` / `navigator.plugins` / `navigator.vendor` / `navigator.permissions` / `navigator.languages` / `navigator.hardwareConcurrency`
-- `user-agent-override` / `media.codecs`
-- `iframe.contentWindow` / `window.outerdimensions`
-- `webgl.vendor` / `sourceurl` / `defaultArgs`
-
-**Plus Extra Stealth Layer:**
-- Deep webdriver property cleanup
-- Permissions API spoofing
-- Chrome runtime emulation
-- Connection API spoofing
-- Stack trace cleanup (removes playwright/puppeteer traces)
-- Notification permission normalization
-
-## 🔄 Dual Mode
-
-Run `--dual-mode` to execute both STEALTH and OBSERVE scans, then compare:
-
-```
-  📊 DUAL MODE COMPARISON
-  Metric                    STEALTH         OBSERVE
-  ───────────────────────────────────────────────
-  Risk Score                62              48
-  Total Events              1247            869
-  Categories                14              9
+### Stealth Mode (Monitor + Counter-Fingerprint)
+```bash
+node index.js --url https://browserscan.net --mode stealth
 ```
 
-This reveals whether the target website **behaves differently** when it detects automation.
+### Options
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--url` | Target URL to analyze | (required) |
+| `--mode` | `observe` or `stealth` | `observe` |
+| `--timeout` | Base timeout in ms | `60000` |
+| `--max-timeout` | Maximum adaptive timeout | `120000` |
+| `--output` | Output directory | `./output` |
+| `--headless` / `--no-headless` | Browser visibility | `true` |
 
-## 📊 Output
+## Output
 
-Each scan generates 3 files in `./output/`:
-- `*_report.json` — Structured metrics, threats, risk score
-- `*_report.html` — Visual dashboard with threat assessment
-- `*_context-map.json` — Frame/origin hierarchy
+Reports are saved to the `output/` directory:
+- `sentinel_<timestamp>_report.json` — Full structured data
+- `sentinel_<timestamp>_report.html` — Visual forensic report
+- `sentinel_<timestamp>_context.json` — Frame/injection context
 
-## ⚠️ FingerprintJS v5 Detection
+## Categories Monitored (37)
 
-Sentinel v3 automatically detects the **FingerprintJS v5 signature** pattern:
-- Canvas `isPointInPath` + audio fingerprinting + font detection + math fingerprinting
-- Triggers a CRITICAL threat alert when detected
+canvas, webgl, audio, font-detection, fingerprint, screen, storage, network, perf-timing, media-devices, dom-probe, clipboard, geolocation, service-worker, hardware, exfiltration, webrtc, math-fingerprint, permissions, speech, client-hints, intl-fingerprint, css-fingerprint, property-enum, offscreen-canvas, honeypot, credential, system, encoding, worker, webassembly, keyboard-layout, sensor-apis, visualization, device-info, battery, bluetooth
 
 ## License
 
-MIT
+ISC
