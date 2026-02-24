@@ -1,122 +1,92 @@
 /**
- * Sentinel v3 — Stealth Configuration Manager
- * Manages stealth plugin evasions for realistic browser simulation
+ * Sentinel v4.5 — Stealth Configuration (ZERO SPOOFING)
+ *
+ * PHILOSOPHY: We are a CCTV camera, not a disguise.
+ * This file ONLY removes Playwright automation markers that would
+ * cause the browser to behave differently from a normal browser.
+ * 
+ * We do NOT spoof:
+ *   - User Agent (let browser report its real UA)
+ *   - Language/locale (let browser report its real language)
+ *   - Platform (let browser report its real platform)
+ *   - Plugins/mimeTypes (let browser report what it has)
+ *   - WebGL vendor/renderer (let GPU report real values)
+ *   - Hardware concurrency/device memory (let browser report real values)
+ *   - Screen resolution (let browser report real values)
+ *   - Battery/connection (let browser report real values)
+ *   - Timezone/geolocation (let browser report real values)
+ *
+ * We ONLY clean up:
+ *   - navigator.webdriver (Playwright sets this to true)
+ *   - window.__playwright / __pw_manual (Playwright internal markers)
+ *   - "Chrome is being controlled by automated test software" bar
  */
 
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-
-/**
- * Create stealth plugin with all 17 evasions enabled (default)
- * Plus extra hardening for advanced bot-detection bypass
- */
-function createStealthPlugin(options = {}) {
-  const stealth = StealthPlugin();
-
-  // By default all evasions are ON. User can disable specific ones:
-  // chrome.app, chrome.csi, chrome.loadTimes, chrome.runtime,
-  // defaultArgs, iframe.contentWindow, media.codecs,
-  // navigator.hardwareConcurrency, navigator.languages,
-  // navigator.permissions, navigator.plugins, navigator.vendor,
-  // navigator.webdriver, sourceurl, user-agent-override,
-  // webgl.vendor, window.outerdimensions
-
-  if (options.disableEvasions && Array.isArray(options.disableEvasions)) {
-    for (const evasion of options.disableEvasions) {
-      stealth.enabledEvasions.delete(evasion);
-    }
-  }
-
-  return stealth;
+function createStealthPlugin() {
+  // v4.5: No playwright-extra plugin needed. We handle cleanup ourselves.
+  return null;
 }
 
-/**
- * Extra stealth hardening — injected as page script
- * Covers vectors NOT handled by stealth plugin:
- * - Permissions API spoofing
- * - WebDriver property deep cleanup
- * - Chrome DevTools Protocol leak prevention
- * - navigator.connection spoofing
- * - Battery API spoofing
- */
-function getExtraStealthScript() {
+function getExtraStealthScript(config) {
   return `
-    // ═══ EXTRA STEALTH LAYER ═══
+    // ═══ SENTINEL v4.5 — AUTOMATION MARKER CLEANUP ONLY ═══
+    // Zero spoofing. Only remove markers that say "I am automated".
 
-    // 1. Deep webdriver cleanup (beyond stealth plugin)
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
-      configurable: true
-    });
-
-    // Remove automation indicators from window
-    delete window.__playwright;
-    delete window.__pw_manual;
-    delete window.__PW_inspect;
-
-    // 2. Permissions API — return "prompt" for common permissions
-    if (navigator.permissions) {
-      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = async (desc) => {
-        if (['notifications', 'push', 'midi', 'camera', 'microphone',
-             'speaker', 'device-info', 'background-fetch', 'background-sync',
-             'bluetooth', 'persistent-storage', 'ambient-light-sensor',
-             'accelerometer', 'gyroscope', 'magnetometer', 'clipboard-read',
-             'clipboard-write', 'payment-handler', 'idle-detection',
-             'periodic-background-sync', 'screen-wake-lock', 'nfc'
-        ].includes(desc.name)) {
-          return { state: 'prompt', onchange: null };
-        }
-        return originalQuery(desc);
-      };
-    }
-
-    // 3. Chrome runtime — ensure window.chrome exists properly
-    if (!window.chrome) {
-      window.chrome = {};
-    }
-    if (!window.chrome.runtime) {
-      window.chrome.runtime = {
-        connect: () => {},
-        sendMessage: () => {},
-        id: undefined
-      };
-    }
-
-    // 4. Connection API spoofing
-    if (navigator.connection) {
-      Object.defineProperty(navigator.connection, 'rtt', { get: () => 50, configurable: true });
-      Object.defineProperty(navigator.connection, 'downlink', { get: () => 10, configurable: true });
-      Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g', configurable: true });
-    }
-
-    // 5. Notification permission — avoid "denied" (suspicious for real user)
-    if (window.Notification) {
-      Object.defineProperty(Notification, 'permission', {
-        get: () => 'default',
+    // 1. Remove navigator.webdriver (Playwright sets this to true)
+    try {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: function() { return undefined; },
         configurable: true
       });
-    }
+      // Also clean prototype
+      if (Object.getPrototypeOf(navigator)) {
+        try {
+          Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', {
+            get: function() { return undefined; },
+            configurable: true
+          });
+        } catch(e) {}
+      }
+    } catch(e) {}
 
-    // 6. Prevent detection of automation via stack trace analysis
-    const origError = Error;
-    const origPrepare = Error.prepareStackTrace;
-    // Cleanup puppeteer/playwright traces from stack
-    Error.prepareStackTrace = function(error, stack) {
-      const filtered = stack.filter(frame => {
-        const file = frame.getFileName() || '';
-        return !file.includes('puppeteer') &&
-               !file.includes('playwright') &&
-               !file.includes('pptr:') &&
-               !file.includes('__puppeteer');
-      });
-      if (origPrepare) return origPrepare(error, filtered);
-      return error.toString() + '\\n' + filtered.map(f =>
-        '    at ' + f.toString()
-      ).join('\\n');
-    };
+    // 2. Remove Playwright/Puppeteer/Selenium internal markers
+    try {
+      var autoMarkers = [
+        '__playwright', '__pw_manual', '__PW_inspect',
+        '__selenium_evaluate', '__selenium_unwrapped',
+        '__driver_evaluate', '__driver_unwrapped',
+        '__webdriver_evaluate', '__webdriver_unwrapped',
+        '__webdriver_script_fn', '__fxdriver_evaluate',
+        '__fxdriver_unwrapped',
+        '_phantom', '__nightmare', '_selenium',
+        'callPhantom', 'callSelenium',
+        'domAutomation', 'domAutomationController',
+        '_Recaptcha'
+      ];
+      for (var i = 0; i < autoMarkers.length; i++) {
+        try { delete window[autoMarkers[i]]; } catch(e) {}
+        try { delete document[autoMarkers[i]]; } catch(e) {}
+      }
+    } catch(e) {}
 
-    // 7. SourceURL cleanup (complement to stealth plugin)
-    // Prevent leaking injected script source URLs
+    // 3. Ensure chrome.runtime exists (normal Chrome has it, Playwright doesn't)
+    try {
+      if (!window.chrome) window.chrome = {};
+      if (!window.chrome.runtime) {
+        window.chrome.runtime = {
+          connect: function() { return { onMessage: { addListener: function(){} }, postMessage: function(){}, disconnect: function(){}, onDisconnect: { addListener: function(){} } }; },
+          sendMessage: function() {},
+          id: undefined,
+          onConnect: { addListener: function(){}, removeListener: function(){}, hasListener: function(){ return false; } },
+          onMessage: { addListener: function(){}, removeListener: function(){}, hasListener: function(){ return false; } }
+        };
+      }
+      if (!window.chrome.app) {
+        window.chrome.app = { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } };
+      }
+    } catch(e) {}
+
+    console.log('[Sentinel v4.5] Automation markers cleaned — zero spoofing active');
   `;
 }
 

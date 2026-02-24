@@ -1,24 +1,21 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "3.0.0",
-  "description": "Sentinel v3 \u2014 Browser Activity Viewer & Maling Catcher with Stealth Mode",
+  "version": "4.5.0",
+  "description": "Sentinel v4.5 \u2014 Full Conversation Forensic Catcher. Pure CCTV mode, zero spoofing, bidirectional network capture.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "scan": "node index.js",
-    "dual": "node index.js --dual-mode"
+    "dual": "node index.js --dual-mode --no-headless"
   },
   "dependencies": {
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "playwright": "^1.49.0",
-    "chalk": "^4.1.2",
-    "ora": "^5.4.1"
+    "playwright": "^1.50.0"
   },
   "keywords": [
+    "browser",
+    "forensic",
     "fingerprint",
-    "browser-security",
-    "stealth",
+    "detection",
     "sentinel"
   ],
   "license": "MIT"
