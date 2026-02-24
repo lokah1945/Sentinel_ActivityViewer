@@ -1,160 +1,128 @@
 /**
- * Sentinel v4 — Stealth Configuration Manager
- * Enhanced with anti-detection shield integration
- * Manages stealth plugin evasions for realistic browser simulation
+ * Sentinel v4.3 — Stealth Configuration
+ * Counter-fingerprinting measures for stealth mode
+ * Injected via addInitScript ONLY (not CDP)
  */
 
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+function getStealthConfig() {
+  return {
+    webdriver: function() {
+      return "Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; } });\n" +
+        "if (navigator.__proto__) { Object.defineProperty(navigator.__proto__, 'webdriver', { get: function() { return undefined; } }); }";
+    },
 
-/**
- * Create stealth plugin with all 17 evasions enabled (default)
- * Plus extra hardening for advanced bot-detection bypass
- */
-function createStealthPlugin(options = {}) {
-  const stealth = StealthPlugin();
+    chromeRuntime: function() {
+      return "if (!window.chrome) { window.chrome = {}; }\n" +
+        "if (!window.chrome.runtime) {\n" +
+        "  window.chrome.runtime = {\n" +
+        "    connect: function() { return { onMessage: { addListener: function(){} }, postMessage: function(){}, onDisconnect: { addListener: function(){} } }; },\n" +
+        "    sendMessage: function(msg, cb) { if (cb) cb(undefined); },\n" +
+        "    id: undefined,\n" +
+        "    onConnect: { addListener: function(){} },\n" +
+        "    onMessage: { addListener: function(){} }\n" +
+        "  };\n" +
+        "}";
+    },
 
-  // All evasions ON by default. Can disable specific ones:
-  if (options.disableEvasions && Array.isArray(options.disableEvasions)) {
-    for (const evasion of options.disableEvasions) {
-      stealth.enabledEvasions.delete(evasion);
+    permissions: function() {
+      return "var _origQuery = navigator.permissions ? navigator.permissions.query : null;\n" +
+        "if (_origQuery) {\n" +
+        "  navigator.permissions.query = function(desc) {\n" +
+        "    if (desc && desc.name === 'notifications') {\n" +
+        "      return Promise.resolve({ state: 'prompt', onchange: null });\n" +
+        "    }\n" +
+        "    return _origQuery.call(navigator.permissions, desc);\n" +
+        "  };\n" +
+        "}";
+    },
+
+    plugins: function() {
+      return "Object.defineProperty(navigator, 'plugins', {\n" +
+        "  get: function() {\n" +
+        "    return [\n" +
+        "      { name: 'Chrome PDF Plugin', description: 'Portable Document Format', filename: 'internal-pdf-viewer', length: 1 },\n" +
+        "      { name: 'Chrome PDF Viewer', description: '', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', length: 1 },\n" +
+        "      { name: 'Native Client', description: '', filename: 'internal-nacl-plugin', length: 2 }\n" +
+        "    ];\n" +
+        "  }\n" +
+        "});";
+    },
+
+    languages: function() {
+      return "Object.defineProperty(navigator, 'languages', {\n" +
+        "  get: function() { return ['en-US', 'en']; }\n" +
+        "});\n" +
+        "Object.defineProperty(navigator, 'language', {\n" +
+        "  get: function() { return 'en-US'; }\n" +
+        "});";
+    },
+
+    hardwareConcurrency: function() {
+      return "Object.defineProperty(navigator, 'hardwareConcurrency', {\n" +
+        "  get: function() { return 8; }\n" +
+        "});";
+    },
+
+    deviceMemory: function() {
+      return "if ('deviceMemory' in navigator) {\n" +
+        "  Object.defineProperty(navigator, 'deviceMemory', {\n" +
+        "    get: function() { return 8; }\n" +
+        "  });\n" +
+        "}";
+    },
+
+    platform: function() {
+      return "Object.defineProperty(navigator, 'platform', {\n" +
+        "  get: function() { return 'Win32'; }\n" +
+        "});";
+    },
+
+    webglVendor: function() {
+      return "var _origGetParam = WebGLRenderingContext.prototype.getParameter;\n" +
+        "WebGLRenderingContext.prototype.getParameter = function(param) {\n" +
+        "  var ext = this.getExtension('WEBGL_debug_renderer_info');\n" +
+        "  if (ext) {\n" +
+        "    if (param === ext.UNMASKED_VENDOR_WEBGL) return 'Google Inc. (Intel)';\n" +
+        "    if (param === ext.UNMASKED_RENDERER_WEBGL) return 'ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.5)';\n" +
+        "  }\n" +
+        "  return _origGetParam.call(this, param);\n" +
+        "};";
+    },
+
+    connection: function() {
+      return "if (navigator.connection) {\n" +
+        "  Object.defineProperty(navigator.connection, 'rtt', { get: function() { return 50; }, configurable: true });\n" +
+        "  Object.defineProperty(navigator.connection, 'downlink', { get: function() { return 10; }, configurable: true });\n" +
+        "  Object.defineProperty(navigator.connection, 'effectiveType', { get: function() { return '4g'; }, configurable: true });\n" +
+        "  Object.defineProperty(navigator.connection, 'saveData', { get: function() { return false; }, configurable: true });\n" +
+        "}";
+    },
+
+    batteryCharging: function() {
+      return "if (navigator.getBattery) {\n" +
+        "  var _origGetBattery = navigator.getBattery;\n" +
+        "  navigator.getBattery = function() {\n" +
+        "    return _origGetBattery.call(navigator).then(function(battery) {\n" +
+        "      Object.defineProperty(battery, 'charging', { get: function() { return true; }, configurable: true });\n" +
+        "      Object.defineProperty(battery, 'chargingTime', { get: function() { return 0; }, configurable: true });\n" +
+        "      Object.defineProperty(battery, 'dischargingTime', { get: function() { return Infinity; }, configurable: true });\n" +
+        "      Object.defineProperty(battery, 'level', { get: function() { return 1.0; }, configurable: true });\n" +
+        "      return battery;\n" +
+        "    });\n" +
+        "  };\n" +
+        "}";
     }
-  }
-
-  return stealth;
+  };
 }
 
-/**
- * Extra stealth hardening — injected as page script
- * v4 upgrade: Enhanced with deeper cleanup and consistency checks
- */
 function getExtraStealthScript() {
-  return `
-    // ═══ EXTRA STEALTH LAYER v4 ═══
-
-    // 1. Deep webdriver cleanup
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
-      configurable: true
-    });
-
-    // Remove ALL automation indicators
-    const autoProps = [
-      '__playwright', '__pw_manual', '__PW_inspect',
-      '__selenium_evaluate', '__fxdriver_evaluate',
-      '__driver_evaluate', '__webdriver_evaluate',
-      '__selenium_unwrapped', '__webdriver_unwrapped',
-      '_phantom', '__nightmare', '_selenium',
-      'callPhantom', 'callSelenium',
-      '_Recaptcha', '__recaptcha',
-      'domAutomation', 'domAutomationController'
-    ];
-    for (const prop of autoProps) {
-      try { delete window[prop]; } catch(e) {}
-      try { delete document[prop]; } catch(e) {}
-    }
-
-    // 2. Permissions API — return "prompt" for common permissions
-    if (navigator.permissions) {
-      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-      const permNames = [
-        'notifications', 'push', 'midi', 'camera', 'microphone',
-        'speaker', 'device-info', 'background-fetch', 'background-sync',
-        'bluetooth', 'persistent-storage', 'ambient-light-sensor',
-        'accelerometer', 'gyroscope', 'magnetometer', 'clipboard-read',
-        'clipboard-write', 'payment-handler', 'idle-detection',
-        'periodic-background-sync', 'screen-wake-lock', 'nfc'
-      ];
-      navigator.permissions.query = async (desc) => {
-        if (permNames.includes(desc?.name)) {
-          return { state: 'prompt', onchange: null };
-        }
-        return originalQuery(desc);
-      };
-    }
-
-    // 3. Chrome runtime — ensure window.chrome exists properly
-    if (!window.chrome) {
-      window.chrome = {};
-    }
-    if (!window.chrome.runtime) {
-      window.chrome.runtime = {
-        connect: function() {},
-        sendMessage: function() {},
-        id: undefined
-      };
-    }
-    if (!window.chrome.app) {
-      window.chrome.app = {
-        isInstalled: false,
-        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
-        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
-        getDetails: function() { return null; },
-        getIsInstalled: function() { return false; }
-      };
-    }
-    if (!window.chrome.csi) {
-      window.chrome.csi = function() {
-        return {
-          onloadT: Date.now(),
-          startE: Date.now(),
-          pageT: performance.now(),
-          tran: 15
-        };
-      };
-    }
-    if (!window.chrome.loadTimes) {
-      window.chrome.loadTimes = function() {
-        return {
-          commitLoadTime: Date.now() / 1000,
-          connectionInfo: 'h2',
-          finishDocumentLoadTime: Date.now() / 1000,
-          finishLoadTime: Date.now() / 1000,
-          firstPaintAfterLoadTime: 0,
-          firstPaintTime: Date.now() / 1000,
-          navigationType: 'Other',
-          npnNegotiatedProtocol: 'h2',
-          requestTime: Date.now() / 1000,
-          startLoadTime: Date.now() / 1000,
-          wasAlternateProtocolAvailable: false,
-          wasFetchedViaSpdy: true,
-          wasNpnNegotiated: true
-        };
-      };
-    }
-
-    // 4. Connection API spoofing
-    if (navigator.connection) {
-      try {
-        Object.defineProperty(navigator.connection, 'rtt', { get: () => 50, configurable: true });
-        Object.defineProperty(navigator.connection, 'downlink', { get: () => 10, configurable: true });
-        Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g', configurable: true });
-        Object.defineProperty(navigator.connection, 'saveData', { get: () => false, configurable: true });
-      } catch(e) {}
-    }
-
-    // 5. Notification permission
-    if (window.Notification) {
-      Object.defineProperty(Notification, 'permission', {
-        get: () => 'default',
-        configurable: true
-      });
-    }
-
-    // 6. Plugin/MimeType array consistency
-    // Ensure plugins array has correct prototype chain
-    if (navigator.plugins && navigator.plugins.length === 0) {
-      // Headless Chrome has 0 plugins — suspicious
-      // The stealth plugin should handle this, but double-check
-    }
-
-    // 7. iframe contentWindow consistency
-    // Prevent detection via iframe.contentWindow property checks
-
-    // 8. WebGL vendor/renderer consistency is handled by stealth plugin
-
-    // 9. Prevent CDP leak via Runtime.enable detection
-    // rebrowser-patches style: don't expose binding artifacts
-  `;
+  var config = getStealthConfig();
+  var parts = [];
+  var keys = Object.keys(config);
+  for (var i = 0; i < keys.length; i++) {
+    parts.push(config[keys[i]]());
+  }
+  return parts.join('\n\n');
 }
 
-module.exports = { createStealthPlugin, getExtraStealthScript };
+module.exports = { getStealthConfig, getExtraStealthScript };

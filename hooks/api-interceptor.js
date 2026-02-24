@@ -1,1233 +1,903 @@
 /**
- * Sentinel v4 — Forensic API Interceptor (Layer 3 + Layer 4)
- * 
- * UPGRADE from v3:
- * - VALUE CAPTURE: Every hook logs the actual return value (1H5W: WHAT)
- * - STACK SAMPLING: Periodic Error.stack capture (1H5W: WHO called it)
- * - ORIGIN TRACKING: Full frame/origin info (1H5W: WHERE)
- * - TIMESTAMP PRECISION: sub-ms timing (1H5W: WHEN)
- * - RISK REASONING: Why each call is suspicious (1H5W: WHY)
- * - METHOD DETAIL: How the API was invoked (1H5W: HOW)
- * 
- * Layer 3: Enhanced 19 original categories with forensic data
- * Layer 4: 12+ new vectors (speech, client hints, intl, css.supports, 
- *          property enumeration, offscreen canvas, wasm timing,
- *          mutation observer, intersection observer, gamepad, 
- *          credential management, web locks)
+ * Sentinel v4.3 — API Interceptor
+ * 200+ API hooks across 37 categories
+ * ES5-compatible browser code (injected into page context)
+ *
+ * KEY SAFETY:
+ * - Non-destructive event collection (push, not spread/reassign)
+ * - BOOT_OK protocol for injection verification
+ * - __SENTINEL_FLUSH__ for event retrieval
+ * - No ...args, no [...spread], no arrow functions in browser code
  */
 
-function getInterceptorScript(config = {}) {
-  const timeout = config.timeout || 30000;
-  const sampleRate = config.stackSampleRate || 10; // sample stack every N calls per API
+function getInterceptorScript(options) {
+  options = options || {};
+  var stealthEnabled = !!options.stealthEnabled;
 
   return `
-  (function() {
-    'use strict';
+(function() {
+  'use strict';
 
-    // ═══════════════════════════════════════════
-    //  SENTINEL v4 — FORENSIC MALING CATCHER
-    // ═══════════════════════════════════════════
+  // ── Guard: prevent double-injection ──
+  if (window.__SENTINEL_ACTIVE__) return;
+  window.__SENTINEL_ACTIVE__ = true;
 
-    const _sentinel = {
-      events: [],
-      startTime: Date.now(),
-      bootOk: false,
-      frameId: Math.random().toString(36).substr(2, 8),
-      config: {
-        timeout: ${timeout},
-        maxEvents: 100000,
-        stackSampleRate: ${sampleRate}
-      },
-      counters: {},
-      valueLog: []
+  // ── Event Buffer (non-destructive push only) ──
+  var _events = [];
+  var _startTime = Date.now();
+  var _dedupMap = {};
+  var _dedupCount = 0;
+  var _maxEvents = 50000;
+
+  function getTs() {
+    return Date.now() - _startTime;
+  }
+
+  function dedupKey(api, cat, detail) {
+    return api + '|' + cat + '|' + (detail || '').slice(0, 50);
+  }
+
+  function record(api, cat, risk, detail, value, extra) {
+    if (_events.length >= _maxEvents) return;
+
+    var key = dedupKey(api, cat, detail);
+    var now = getTs();
+
+    // Dedup: same api+cat+detail within 200ms
+    if (_dedupMap[key] && (now - _dedupMap[key]) < 200) {
+      _dedupCount++;
+      return;
+    }
+    _dedupMap[key] = now;
+
+    var evt = {
+      ts: now,
+      api: api,
+      cat: cat || 'system',
+      risk: risk || 'info',
+      detail: detail || '',
+      origin: (typeof location !== 'undefined') ? location.origin : '',
+      frameId: (typeof window !== 'undefined' && window.frameElement) ? 'child' : 'main'
     };
-
-    const _shield = window.__SENTINEL_SHIELD__;
-
-    // ═══ FORENSIC LOGGER (1H5W) ═══
-    function log(category, api, detail, risk, options) {
-      if (_sentinel.events.length >= _sentinel.config.maxEvents) return;
-
-      const opts = options || {};
-      const counter = _sentinel.counters[api] = (_sentinel.counters[api] || 0) + 1;
-
-      // Stack sampling: capture WHO is calling (every N calls)
-      let stack = null;
-      if (counter % _sentinel.config.stackSampleRate === 1) {
-        try {
-          const err = new Error();
-          stack = (err.stack || '').split('\n').slice(2, 6).map(s => s.trim()).join(' | ');
-        } catch(e) {}
+    if (value !== undefined && value !== null) {
+      try { evt.value = String(value).slice(0, 500); } catch(e) { evt.value = '[unreadable]'; }
+    }
+    if (extra) {
+      var ekeys = Object.keys(extra);
+      for (var i = 0; i < ekeys.length; i++) {
+        evt[ekeys[i]] = extra[ekeys[i]];
       }
+    }
 
-      const origin = (typeof location !== 'undefined') ? location.origin : 'unknown';
-      let frameType = 'top';
-      try {
-        if (window !== window.top) frameType = 'iframe';
-      } catch(e) {
-        frameType = 'cross-origin-iframe';
-      }
+    // Non-destructive push
+    _events.push(evt);
+  }
 
-      const event = {
-        ts: Date.now() - _sentinel.startTime,
-        cat: category,
-        api: api,
-        detail: null,
-        value: null,
-        risk: risk || 'low',
-        origin: origin,
-        frame: frameType,
-        frameId: _sentinel.frameId,
-        url: (typeof location !== 'undefined') ? location.href : 'unknown',
-        callCount: counter
-      };
+  // ── BOOT_OK: Signal successful injection ──
+  record('BOOT_OK', 'system', 'info', location.href);
 
-      // Safely serialize detail
-      if (detail !== undefined && detail !== null) {
-        try {
-          if (typeof detail === 'object') {
-            event.detail = JSON.stringify(detail).slice(0, 500);
-          } else {
-            event.detail = String(detail).slice(0, 500);
-          }
-        } catch(e) {
-          event.detail = '[unserializable]';
+  // ── Flush mechanism for Node.js to retrieve events ──
+  window.__SENTINEL_FLUSH__ = function() {
+    var result = {
+      events: _events.slice(0),
+      dedupStats: { totalReceived: _events.length + _dedupCount, deduplicated: _dedupCount, kept: _events.length }
+    };
+    return JSON.stringify(result);
+  };
+
+  // ── Helper: safe hook ──
+  function hookMethod(obj, prop, cat, risk, hookFn) {
+    if (!obj || typeof obj[prop] !== 'function') return;
+    var orig = obj[prop];
+    try {
+      obj[prop] = function() {
+        var args = [];
+        for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+        var detail = '';
+        if (hookFn) {
+          try { detail = hookFn(args, this); } catch(e) {}
         }
-      }
-
-      // Capture return value (WHAT)
-      if (opts.returnValue !== undefined) {
-        try {
-          const rv = opts.returnValue;
-          if (rv === null || rv === undefined) {
-            event.value = String(rv);
-          } else if (typeof rv === 'string') {
-            event.value = rv.slice(0, 300);
-          } else if (typeof rv === 'number' || typeof rv === 'boolean') {
-            event.value = String(rv);
-          } else if (Array.isArray(rv)) {
-            event.value = JSON.stringify(rv.slice(0, 10)).slice(0, 300);
-          } else if (typeof rv === 'object') {
-            event.value = JSON.stringify(rv).slice(0, 300);
-          } else {
-            event.value = String(rv).slice(0, 200);
-          }
-        } catch(e) {
-          event.value = '[capture-error]';
-        }
-      }
-
-      // Stack trace (WHO)
-      if (stack) {
-        event.stack = stack;
-      }
-
-      // WHY reasoning
-      if (opts.why) {
-        event.why = opts.why;
-      }
-
-      // HOW detail
-      if (opts.how) {
-        event.how = opts.how;
-      }
-
-      _sentinel.events.push(event);
-    }
-
-    // ═══ HELPER: Safe hook via shield or direct ═══
-    function hookFn(target, prop, category, risk, options) {
-      const opts = options || {};
-      const why = opts.why || '';
-
-      if (_shield && _shield.hookFunction) {
-        _shield.hookFunction(target, prop, function(original, ...args) {
-          const detail = opts.detailFn ? opts.detailFn(args) : { args: args.length };
-          const result = original.apply(this, args);
-
-          // Handle promise results
-          if (result && typeof result.then === 'function') {
-            result.then(val => {
-              log(category, prop, detail, risk, { 
-                returnValue: opts.valueFn ? opts.valueFn(val) : val,
-                why: why,
-                how: 'async-call'
-              });
-            }).catch(() => {});
-            // Still log the call synchronously
-            log(category, prop, detail, risk, { why: why, how: 'async-call-initiated' });
-            return result;
-          }
-
-          log(category, prop, detail, risk, { 
-            returnValue: opts.valueFn ? opts.valueFn(result) : result,
-            why: why,
-            how: opts.how || 'direct-call'
-          });
-          return result;
-        });
-      } else {
-        // Fallback: direct hook without shield protection
-        const original = target[prop];
-        if (!original || typeof original !== 'function') return;
-        target[prop] = function(...args) {
-          const detail = opts.detailFn ? opts.detailFn(args) : { args: args.length };
-          const result = original.apply(this, args);
-          log(category, prop, detail, risk, { 
-            returnValue: opts.valueFn ? opts.valueFn(result) : result,
-            why: why
-          });
-          return result;
-        };
-      }
-    }
-
-    function hookGetter(target, prop, category, risk, options) {
-      const opts = options || {};
-      const why = opts.why || '';
-
-      if (_shield && _shield.hookGetter) {
-        _shield.hookGetter(target, prop, function(originalGetter) {
-          const value = originalGetter.call(this);
-          log(category, prop, {}, risk, {
-            returnValue: opts.valueFn ? opts.valueFn(value) : value,
-            why: why,
-            how: 'getter-access'
-          });
-          return value;
-        });
-      } else {
-        const desc = Object.getOwnPropertyDescriptor(target, prop);
-        if (!desc || !desc.get) return;
-        const origGetter = desc.get;
-        Object.defineProperty(target, prop, {
-          get: function() {
-            const value = origGetter.call(this);
-            log(category, prop, {}, risk, {
-              returnValue: opts.valueFn ? opts.valueFn(value) : value,
-              why: why
-            });
-            return value;
-          },
-          set: desc.set,
-          enumerable: desc.enumerable,
-          configurable: true
-        });
-      }
-    }
-
-    // ═══════════════════════════════════════════
-    //  LAYER 3: ENHANCED CORE HOOKS (19 categories)
-    // ═══════════════════════════════════════════
-
-    // ═══ 1. CANVAS FINGERPRINTING ═══
-    hookFn(HTMLCanvasElement.prototype, 'toDataURL', 'canvas', 'high', {
-      detailFn: (args) => ({ type: args[0] || 'image/png', quality: args[1] }),
-      valueFn: (v) => v ? v.slice(0, 80) + '...[hash:' + hashStr(v) + ']' : null,
-      why: 'Canvas toDataURL generates unique pixel hash per GPU/driver combination'
-    });
-
-    hookFn(HTMLCanvasElement.prototype, 'toBlob', 'canvas', 'high', {
-      detailFn: (args) => ({ type: args[1] || 'image/png' }),
-      valueFn: (v) => v ? { type: 'Blob', size: v.size } : null,
-      why: 'Canvas toBlob exports pixel data for fingerprint hashing'
-    });
-
-    hookFn(CanvasRenderingContext2D.prototype, 'getImageData', 'canvas', 'high', {
-      detailFn: (args) => ({ x: args[0], y: args[1], w: args[2], h: args[3] }),
-      valueFn: (v) => v ? { width: v.width, height: v.height, dataLen: v.data?.length } : null,
-      why: 'Raw pixel data extraction for canvas fingerprint computation'
-    });
-
-    hookFn(CanvasRenderingContext2D.prototype, 'fillText', 'canvas', 'medium', {
-      detailFn: (args) => ({ text: String(args[0]).slice(0, 50), x: args[1], y: args[2] }),
-      why: 'Text rendering varies by font engine — used in canvas fingerprint'
-    });
-
-    hookFn(CanvasRenderingContext2D.prototype, 'measureText', 'font-detection', 'high', {
-      detailFn: (args) => ({ text: String(args[0]).slice(0, 30) }),
-      valueFn: (v) => v ? { width: v.width } : null,
-      why: 'Font metric measurement for installed font detection'
-    });
-
-    hookFn(CanvasRenderingContext2D.prototype, 'isPointInPath', 'canvas', 'medium', {
-      detailFn: (args) => ({ x: args[0], y: args[1] }),
-      valueFn: (v) => v,
-      why: 'Path rendering test — FingerprintJS v5 signature API'
-    });
-
-    hookFn(CanvasRenderingContext2D.prototype, 'isPointInStroke', 'canvas', 'medium', {
-      detailFn: (args) => ({ x: args[0], y: args[1] }),
-      valueFn: (v) => v,
-      why: 'Stroke rendering test for GPU/driver fingerprinting'
-    });
-
-    // getContext — track canvas context creation
-    hookFn(HTMLCanvasElement.prototype, 'getContext', 'canvas', 'medium', {
-      detailFn: (args) => ({ contextType: args[0], attrs: args[1] }),
-      valueFn: (v) => v ? v.constructor?.name : null,
-      why: 'Canvas context creation — precursor to fingerprinting'
-    });
-
-    // ═══ 2. WEBGL FINGERPRINTING ═══
-    function hookWebGL(proto, name) {
-      hookFn(proto, 'getParameter', 'webgl', 'high', {
-        detailFn: (args) => ({ param: args[0], ctx: name }),
-        valueFn: (v) => {
-          if (v === null || v === undefined) return String(v);
-          if (typeof v === 'string' || typeof v === 'number') return v;
-          if (v instanceof Float32Array || v instanceof Int32Array) return Array.from(v);
-          return String(v).slice(0, 100);
-        },
-        why: 'WebGL parameter reads expose GPU vendor/renderer/capabilities'
-      });
-
-      hookFn(proto, 'getExtension', 'webgl', 'medium', {
-        detailFn: (args) => ({ ext: args[0], ctx: name }),
-        valueFn: (v) => v ? 'supported' : 'null',
-        why: 'WebGL extension enumeration for GPU capability fingerprint'
-      });
-
-      hookFn(proto, 'getSupportedExtensions', 'webgl', 'medium', {
-        detailFn: () => ({ ctx: name }),
-        valueFn: (v) => v ? { count: v.length, list: v.slice(0, 5) } : null,
-        why: 'Full WebGL extension list — high entropy fingerprint source'
-      });
-
-      if (proto.getShaderPrecisionFormat) {
-        hookFn(proto, 'getShaderPrecisionFormat', 'webgl', 'high', {
-          detailFn: (args) => ({ shaderType: args[0], precisionType: args[1], ctx: name }),
-          valueFn: (v) => v ? { rangeMin: v.rangeMin, rangeMax: v.rangeMax, precision: v.precision } : null,
-          why: 'Shader precision reveals GPU hardware specifics'
-        });
-      }
-
-      hookFn(proto, 'getContextAttributes', 'webgl', 'low', {
-        detailFn: () => ({ ctx: name }),
-        valueFn: (v) => v,
-        why: 'WebGL context attributes for rendering capability check'
-      });
-
-      if (proto.readPixels) {
-        hookFn(proto, 'readPixels', 'webgl', 'high', {
-          detailFn: (args) => ({ x: args[0], y: args[1], w: args[2], h: args[3], ctx: name }),
-          why: 'WebGL pixel data extraction for GPU rendering fingerprint'
-        });
-      }
-    }
-
-    if (typeof WebGLRenderingContext !== 'undefined') hookWebGL(WebGLRenderingContext.prototype, 'webgl');
-    if (typeof WebGL2RenderingContext !== 'undefined') hookWebGL(WebGL2RenderingContext.prototype, 'webgl2');
-
-    // ═══ 3. AUDIO FINGERPRINTING ═══
-    if (typeof AudioContext !== 'undefined') {
-      hookFn(AudioContext.prototype, 'createOscillator', 'audio', 'high', {
-        why: 'Oscillator creation for audio fingerprint signal generation'
-      });
-
-      hookFn(AudioContext.prototype, 'createDynamicsCompressor', 'audio', 'high', {
-        why: 'Compressor creation — key component of audio fingerprint'
-      });
-
-      if (AudioContext.prototype.createAnalyser) {
-        hookFn(AudioContext.prototype, 'createAnalyser', 'audio', 'medium', {
-          why: 'Analyser node for frequency/time domain data extraction'
-        });
-      }
-
-      if (AudioContext.prototype.createGain) {
-        hookFn(AudioContext.prototype, 'createGain', 'audio', 'low', {
-          why: 'Gain node creation — part of audio fingerprint pipeline'
-        });
-      }
-
-      if (AudioContext.prototype.createScriptProcessor) {
-        hookFn(AudioContext.prototype, 'createScriptProcessor', 'audio', 'medium', {
-          why: 'Script processor for raw audio sample access'
-        });
-      }
-
-      // baseLatency getter
-      const blDesc = Object.getOwnPropertyDescriptor(AudioContext.prototype, 'baseLatency');
-      if (blDesc && blDesc.get) {
-        hookGetter(AudioContext.prototype, 'baseLatency', 'audio', 'medium', {
-          why: 'Audio base latency is a new FPjs v5 entropy source (Jan 2025)'
-        });
-      }
-
-      // sampleRate getter
-      const srDesc = Object.getOwnPropertyDescriptor(AudioContext.prototype, 'sampleRate') ||
-                     Object.getOwnPropertyDescriptor(BaseAudioContext.prototype, 'sampleRate');
-      if (srDesc && srDesc.get) {
-        hookGetter(srDesc.get ? (AudioContext.prototype.hasOwnProperty('sampleRate') ? AudioContext.prototype : BaseAudioContext.prototype) : AudioContext.prototype, 
-          'sampleRate', 'audio', 'medium', {
-          why: 'Audio sample rate varies by hardware and OS'
-        });
-      }
-    }
-
-    if (typeof OfflineAudioContext !== 'undefined') {
-      hookFn(OfflineAudioContext.prototype, 'startRendering', 'audio', 'critical', {
-        why: 'Offline audio rendering — generates deterministic audio fingerprint hash'
-      });
-      if (OfflineAudioContext.prototype.createOscillator) {
-        hookFn(OfflineAudioContext.prototype, 'createOscillator', 'audio', 'high', {
-          why: 'Offline oscillator for audio fingerprint computation'
-        });
-      }
-      if (OfflineAudioContext.prototype.createDynamicsCompressor) {
-        hookFn(OfflineAudioContext.prototype, 'createDynamicsCompressor', 'audio', 'high', {
-          why: 'Offline compressor for audio fingerprint pipeline'
-        });
-      }
-    }
-
-    // ═══ 4. FONT DETECTION ═══
-    if (document.fonts && document.fonts.check) {
-      const origFontCheck = document.fonts.check.bind(document.fonts);
-      document.fonts.check = function(font, text) {
-        const result = origFontCheck(font, text);
-        log('font-detection', 'document.fonts.check', { font, text }, 'high', {
-          returnValue: result,
-          why: 'CSS Font Loading API check for installed font enumeration'
-        });
-        return result;
+        record(prop, cat, risk, detail);
+        return orig.apply(this, args);
       };
-      if (_shield) {
-        document.fonts.check.toString = function() { return 'function check() { [native code] }'; };
+      // Preserve toString
+      if (window.__sentinelShield__) {
+        window.__sentinelShield__.hookFunction(obj, prop, obj[prop], orig);
       }
+    } catch(e) {}
+  }
+
+  function hookGetter(obj, prop, cat, risk, label) {
+    if (!obj) return;
+    var descriptor = Object.getOwnPropertyDescriptor(obj, prop);
+    if (!descriptor && obj.__proto__) {
+      descriptor = Object.getOwnPropertyDescriptor(obj.__proto__, prop);
     }
+    if (!descriptor) return;
 
-    if (document.fonts && document.fonts.forEach) {
-      const origFontForEach = document.fonts.forEach.bind(document.fonts);
-      document.fonts.forEach = function(...args) {
-        log('font-detection', 'document.fonts.forEach', {}, 'high', {
-          why: 'Font face iteration for full font inventory'
-        });
-        return origFontForEach(...args);
-      };
-    }
-
-    // getBoundingClientRect — font width measurement
-    hookFn(Element.prototype, 'getBoundingClientRect', 'font-detection', 'low', {
-      detailFn: (args) => ({}),
-      valueFn: (v) => v ? { w: Math.round(v.width*100)/100, h: Math.round(v.height*100)/100 } : null,
-      why: 'Element dimension measurement — mass calls indicate font probing'
-    });
-
-    // offsetWidth/offsetHeight
-    const owDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
-    if (owDesc && owDesc.get) {
-      let owCount = 0;
-      const origOW = owDesc.get;
-      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+    var origGet = descriptor.get || (function() { return descriptor.value; });
+    try {
+      Object.defineProperty(obj, prop, {
         get: function() {
-          owCount++;
-          const val = origOW.call(this);
-          if (owCount <= 3 || owCount % 100 === 0) {
-            log('font-detection', 'offsetWidth', { callCount: owCount, tag: this.tagName }, owCount > 200 ? 'high' : 'low', {
-              returnValue: val,
-              why: 'Element width read — bulk calls = font probing pattern'
-            });
-          }
+          var val;
+          try { val = origGet.call(this); } catch(e) { val = undefined; }
+          record(label || prop, cat, risk, '', val);
           return val;
         },
+        set: descriptor.set,
+        enumerable: descriptor.enumerable,
         configurable: true
       });
-    }
+    } catch(e) {}
+  }
 
-    // ═══ 5. NAVIGATOR PROPERTIES ═══
-    const navProps = [
-      { prop: 'userAgent', risk: 'high', why: 'Browser/OS identification string' },
-      { prop: 'platform', risk: 'high', why: 'OS platform identifier' },
-      { prop: 'language', risk: 'medium', why: 'Primary language preference' },
-      { prop: 'languages', risk: 'high', why: 'Full language preference list — locale fingerprint' },
-      { prop: 'hardwareConcurrency', risk: 'high', why: 'CPU core count reveals hardware class' },
-      { prop: 'deviceMemory', risk: 'high', why: 'RAM amount reveals device tier' },
-      { prop: 'maxTouchPoints', risk: 'medium', why: 'Touch capability reveals device type' },
-      { prop: 'vendor', risk: 'medium', why: 'Browser vendor string' },
-      { prop: 'appVersion', risk: 'medium', why: 'Application version string' },
-      { prop: 'oscpu', risk: 'high', why: 'OS + CPU string (Firefox-specific)' },
-      { prop: 'cpuClass', risk: 'high', why: 'CPU architecture class' },
-      { prop: 'product', risk: 'low', why: 'Product identifier' },
-      { prop: 'productSub', risk: 'low', why: 'Product sub-version' },
-      { prop: 'buildID', risk: 'medium', why: 'Build identifier (Firefox)' },
-      { prop: 'doNotTrack', risk: 'medium', why: 'DNT preference — ironically used for fingerprinting' },
-      { prop: 'pdfViewerEnabled', risk: 'medium', why: 'PDF viewer capability' },
-      { prop: 'webdriver', risk: 'critical', why: 'Automation detection flag' },
-      { prop: 'connection', risk: 'medium', why: 'Network connection info' }
-    ];
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 1: CANVAS (canvas)
+  // ══════════════════════════════════════════════════════
 
-    for (const np of navProps) {
-      const desc = Object.getOwnPropertyDescriptor(Navigator.prototype, np.prop) ||
-                   Object.getOwnPropertyDescriptor(navigator, np.prop);
-      if (desc && desc.get) {
-        hookGetter(desc.get.call ? Navigator.prototype : navigator, np.prop, 'fingerprint', np.risk, {
-          valueFn: (v) => {
-            if (Array.isArray(v)) return v.slice(0, 10);
-            if (v && typeof v === 'object') return JSON.stringify(v).slice(0, 200);
-            return v;
-          },
-          why: np.why
-        });
-      }
-    }
+  // toDataURL
+  hookMethod(HTMLCanvasElement.prototype, 'toDataURL', 'canvas', 'high', function(args) {
+    return 'type=' + (args[0] || 'image/png');
+  });
 
-    // navigator.plugins & mimeTypes
-    const pluginsDesc = Object.getOwnPropertyDescriptor(Navigator.prototype, 'plugins');
-    if (pluginsDesc && pluginsDesc.get) {
-      hookGetter(Navigator.prototype, 'plugins', 'fingerprint', 'high', {
-        valueFn: (v) => v ? { length: v.length } : null,
-        why: 'Plugin enumeration for browser/OS fingerprint'
-      });
-    }
+  // toBlob
+  hookMethod(HTMLCanvasElement.prototype, 'toBlob', 'canvas', 'high', function(args) {
+    return 'type=' + (args[1] || 'image/png');
+  });
 
-    const mimeDesc = Object.getOwnPropertyDescriptor(Navigator.prototype, 'mimeTypes');
-    if (mimeDesc && mimeDesc.get) {
-      hookGetter(Navigator.prototype, 'mimeTypes', 'fingerprint', 'medium', {
-        valueFn: (v) => v ? { length: v.length } : null,
-        why: 'MIME type list for browser capability fingerprint'
-      });
-    }
+  // getContext
+  hookMethod(HTMLCanvasElement.prototype, 'getContext', 'canvas', 'medium', function(args) {
+    return 'contextType=' + args[0];
+  });
 
-    // ═══ 6. PERMISSIONS API ═══
-    if (navigator.permissions && navigator.permissions.query) {
-      const origPermQuery = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = function(desc) {
-        const result = origPermQuery(desc);
-        result.then(status => {
-          log('permissions', 'permissions.query', { name: desc?.name }, 'high', {
-            returnValue: { state: status.state },
-            why: 'Permission state reveals user choices — entropy source'
-          });
-        }).catch(() => {});
-        return result;
+  // getImageData
+  if (typeof CanvasRenderingContext2D !== 'undefined') {
+    hookMethod(CanvasRenderingContext2D.prototype, 'getImageData', 'canvas', 'high', function(args) {
+      return args[0] + ',' + args[1] + ',' + args[2] + ',' + args[3];
+    });
+
+    hookMethod(CanvasRenderingContext2D.prototype, 'fillText', 'canvas', 'medium', function(args) {
+      return 'text=' + String(args[0]).slice(0, 50);
+    });
+
+    hookMethod(CanvasRenderingContext2D.prototype, 'strokeText', 'canvas', 'medium', function(args) {
+      return 'text=' + String(args[0]).slice(0, 50);
+    });
+
+    hookMethod(CanvasRenderingContext2D.prototype, 'measureText', 'font-detection', 'high', function(args) {
+      return 'text=' + String(args[0]).slice(0, 30);
+    });
+
+    hookMethod(CanvasRenderingContext2D.prototype, 'isPointInPath', 'canvas', 'medium');
+    hookMethod(CanvasRenderingContext2D.prototype, 'isPointInStroke', 'canvas', 'medium');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 2: WEBGL (webgl)
+  // ══════════════════════════════════════════════════════
+
+  var webglProtos = [];
+  if (typeof WebGLRenderingContext !== 'undefined') webglProtos.push(WebGLRenderingContext.prototype);
+  if (typeof WebGL2RenderingContext !== 'undefined') webglProtos.push(WebGL2RenderingContext.prototype);
+
+  for (var wp = 0; wp < webglProtos.length; wp++) {
+    var wProto = webglProtos[wp];
+
+    hookMethod(wProto, 'getParameter', 'webgl', 'high', function(args) {
+      return 'param=0x' + (args[0] || 0).toString(16);
+    });
+
+    hookMethod(wProto, 'getExtension', 'webgl', 'medium', function(args) {
+      return 'ext=' + args[0];
+    });
+
+    hookMethod(wProto, 'getSupportedExtensions', 'webgl', 'medium');
+    hookMethod(wProto, 'getShaderPrecisionFormat', 'webgl', 'high', function(args) {
+      return 'shader=' + args[0] + ',precision=' + args[1];
+    });
+
+    hookMethod(wProto, 'readPixels', 'webgl', 'high');
+    hookMethod(wProto, 'createBuffer', 'webgl', 'low');
+    hookMethod(wProto, 'createProgram', 'webgl', 'low');
+    hookMethod(wProto, 'createShader', 'webgl', 'low');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 3: AUDIO (audio)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof OfflineAudioContext !== 'undefined') {
+    hookMethod(OfflineAudioContext.prototype, 'startRendering', 'audio', 'critical');
+    hookMethod(OfflineAudioContext.prototype, 'createOscillator', 'audio', 'high');
+    hookMethod(OfflineAudioContext.prototype, 'createDynamicsCompressor', 'audio', 'high');
+    hookMethod(OfflineAudioContext.prototype, 'createAnalyser', 'audio', 'high');
+    hookMethod(OfflineAudioContext.prototype, 'createGain', 'audio', 'medium');
+    hookMethod(OfflineAudioContext.prototype, 'createBiquadFilter', 'audio', 'medium');
+  }
+
+  if (typeof AudioContext !== 'undefined') {
+    hookMethod(AudioContext.prototype, 'createOscillator', 'audio', 'high');
+    hookMethod(AudioContext.prototype, 'createDynamicsCompressor', 'audio', 'high');
+    hookMethod(AudioContext.prototype, 'createAnalyser', 'audio', 'high');
+    hookMethod(AudioContext.prototype, 'createGain', 'audio', 'medium');
+  }
+
+  if (typeof OscillatorNode !== 'undefined') {
+    hookMethod(OscillatorNode.prototype, 'connect', 'audio', 'high');
+    hookMethod(OscillatorNode.prototype, 'start', 'audio', 'medium');
+  }
+
+  if (typeof AnalyserNode !== 'undefined') {
+    hookMethod(AnalyserNode.prototype, 'getFloatFrequencyData', 'audio', 'high');
+    hookMethod(AnalyserNode.prototype, 'getByteFrequencyData', 'audio', 'high');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 4: FONT DETECTION (font-detection)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof document !== 'undefined' && document.fonts) {
+    hookMethod(document.fonts, 'check', 'font-detection', 'high', function(args) {
+      return 'font=' + String(args[0]).slice(0, 50);
+    });
+    hookMethod(document.fonts, 'load', 'font-detection', 'high', function(args) {
+      return 'font=' + String(args[0]).slice(0, 50);
+    });
+  }
+
+  if (typeof FontFace !== 'undefined') {
+    var _origFontFace = FontFace;
+    try {
+      window.FontFace = function(family, source, descriptors) {
+        record('FontFace', 'font-detection', 'high', 'family=' + family);
+        return new _origFontFace(family, source, descriptors);
       };
-      if (_shield) {
-        navigator.permissions.query.toString = function() { return 'function query() { [native code] }'; };
-      }
-    }
+      window.FontFace.prototype = _origFontFace.prototype;
+    } catch(e) {}
+  }
 
-    // ═══ 7. STORAGE HOOKS ═══
-    // Cookies
-    const cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
-    if (cookieDesc) {
+  // getBoundingClientRect for font width measurement
+  if (typeof Element !== 'undefined') {
+    hookMethod(Element.prototype, 'getBoundingClientRect', 'font-detection', 'medium');
+    hookMethod(Element.prototype, 'getClientRects', 'font-detection', 'medium');
+    hookMethod(Element.prototype, 'offsetWidth', 'font-detection', 'low');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 5: SCREEN (screen)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof screen !== 'undefined') {
+    var screenProps = ['width', 'height', 'availWidth', 'availHeight', 'colorDepth', 'pixelDepth', 'orientation'];
+    for (var sp = 0; sp < screenProps.length; sp++) {
+      hookGetter(screen, screenProps[sp], 'screen', 'medium', 'screen.' + screenProps[sp]);
+    }
+  }
+
+  hookGetter(window, 'devicePixelRatio', 'screen', 'medium', 'window.devicePixelRatio');
+  hookGetter(window, 'innerWidth', 'screen', 'low', 'window.innerWidth');
+  hookGetter(window, 'innerHeight', 'screen', 'low', 'window.innerHeight');
+  hookGetter(window, 'outerWidth', 'screen', 'low', 'window.outerWidth');
+  hookGetter(window, 'outerHeight', 'screen', 'low', 'window.outerHeight');
+
+  if (typeof matchMedia !== 'undefined') {
+    hookMethod(window, 'matchMedia', 'css-fingerprint', 'medium', function(args) {
+      return 'query=' + String(args[0]).slice(0, 80);
+    });
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 6: STORAGE (storage)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof localStorage !== 'undefined') {
+    hookMethod(localStorage, 'getItem', 'storage', 'low', function(args) { return 'key=' + args[0]; });
+    hookMethod(localStorage, 'setItem', 'storage', 'medium', function(args) { return 'key=' + args[0]; });
+    hookMethod(localStorage, 'removeItem', 'storage', 'low', function(args) { return 'key=' + args[0]; });
+  }
+
+  if (typeof sessionStorage !== 'undefined') {
+    hookMethod(sessionStorage, 'getItem', 'storage', 'low', function(args) { return 'key=' + args[0]; });
+    hookMethod(sessionStorage, 'setItem', 'storage', 'medium', function(args) { return 'key=' + args[0]; });
+  }
+
+  // IndexedDB
+  if (typeof indexedDB !== 'undefined') {
+    hookMethod(indexedDB, 'open', 'storage', 'medium', function(args) { return 'db=' + args[0]; });
+    hookMethod(indexedDB, 'deleteDatabase', 'storage', 'high', function(args) { return 'db=' + args[0]; });
+  }
+
+  // Cookies
+  try {
+    var _cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
+                      Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie');
+    if (_cookieDesc) {
+      var _origCookieGet = _cookieDesc.get;
+      var _origCookieSet = _cookieDesc.set;
       Object.defineProperty(document, 'cookie', {
         get: function() {
-          const val = cookieDesc.get.call(document);
-          log('storage', 'cookie.get', {}, 'medium', {
-            returnValue: val ? { length: val.length, count: val.split(';').length } : null,
-            why: 'Cookie read for tracking/session identification'
-          });
-          return val;
+          record('document.cookie.get', 'storage', 'low', '');
+          return _origCookieGet.call(document);
         },
         set: function(val) {
-          log('storage', 'cookie.set', { preview: String(val).slice(0, 80) }, 'high', {
-            why: 'Cookie write — potential tracking cookie placement'
-          });
-          return cookieDesc.set.call(document, val);
+          record('document.cookie.set', 'storage', 'medium', 'cookie=' + String(val).slice(0, 50));
+          return _origCookieSet.call(document, val);
         },
         configurable: true
       });
     }
+  } catch(e) {}
 
-    // localStorage / sessionStorage
-    if (window.localStorage) {
-      const origLSGet = Storage.prototype.getItem;
-      Storage.prototype.getItem = function(key) {
-        const sType = (this === window.localStorage) ? 'localStorage' : 'sessionStorage';
-        const result = origLSGet.call(this, key);
-        log('storage', sType + '.getItem', { key }, 'medium', {
-          returnValue: result ? { length: result.length, preview: result.slice(0, 50) } : null,
-          why: 'Storage read — may retrieve stored fingerprint/tracking data'
-        });
-        return result;
-      };
-      const origLSSet = Storage.prototype.setItem;
-      Storage.prototype.setItem = function(key, val) {
-        const sType = (this === window.localStorage) ? 'localStorage' : 'sessionStorage';
-        log('storage', sType + '.setItem', { key, size: String(val).length }, 'high', {
-          returnValue: { size: String(val).length },
-          why: 'Storage write — potential fingerprint/visitor-ID persistence'
-        });
-        return origLSSet.call(this, key, val);
-      };
-    }
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 7: NETWORK / EXFILTRATION (network, exfiltration)
+  // ══════════════════════════════════════════════════════
 
-    // IndexedDB
-    if (window.indexedDB) {
-      hookFn(IDBFactory.prototype, 'open', 'storage', 'high', {
-        detailFn: (args) => ({ name: args[0], version: args[1] }),
-        why: 'IndexedDB open — may store persistent fingerprint data'
-      });
-    }
-
-    // ═══ 8. SCREEN & DISPLAY ═══
-    const screenProps = [
-      { prop: 'width', why: 'Screen width — display resolution fingerprint' },
-      { prop: 'height', why: 'Screen height — display resolution fingerprint' },
-      { prop: 'colorDepth', why: 'Color depth reveals display hardware' },
-      { prop: 'pixelDepth', why: 'Pixel depth — display capability' },
-      { prop: 'availWidth', why: 'Available width reveals taskbar/dock' },
-      { prop: 'availHeight', why: 'Available height reveals OS UI elements' },
-      { prop: 'availTop', why: 'Available screen offset — multi-monitor detection' },
-      { prop: 'availLeft', why: 'Available screen offset — multi-monitor detection' }
-    ];
-
-    for (const sp of screenProps) {
-      const desc = Object.getOwnPropertyDescriptor(Screen.prototype, sp.prop) ||
-                   Object.getOwnPropertyDescriptor(screen, sp.prop);
-      if (desc && desc.get) {
-        hookGetter(Screen.prototype, sp.prop, 'screen', 'medium', {
-          why: sp.why
-        });
-      }
-    }
-
-    // matchMedia
-    const origMatchMedia = window.matchMedia;
-    if (origMatchMedia) {
-      window.matchMedia = function(query) {
-        const result = origMatchMedia.call(window, query);
-        const isFingerprint = /color-gamut|inverted-colors|forced-colors|prefers-|monochrome|dynamic-range|pointer|hover|any-pointer|any-hover/.test(query);
-        if (isFingerprint) {
-          log('fingerprint', 'matchMedia', { query }, 'high', {
-            returnValue: { matches: result.matches },
-            why: 'CSS media query fingerprinting — detects display & accessibility preferences'
-          });
-        }
-        return result;
-      };
-      if (_shield) {
-        window.matchMedia.toString = function() { return 'function matchMedia() { [native code] }'; };
-      }
-    }
-
-    // devicePixelRatio
-    const dprDesc = Object.getOwnPropertyDescriptor(Window.prototype, 'devicePixelRatio');
-    if (dprDesc && dprDesc.get) {
-      hookGetter(Window.prototype, 'devicePixelRatio', 'screen', 'medium', {
-        why: 'Device pixel ratio reveals HiDPI/Retina display'
-      });
-    }
-
-    // ═══ 9. NETWORK & WEBRTC ═══
-    const origFetch = window.fetch;
-    window.fetch = function(...args) {
-      const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-      const method = args[1]?.method || 'GET';
-      const bodyLen = args[1]?.body ? String(args[1].body).length : 0;
-      log('network', 'fetch', { url: url.slice(0, 200), method }, 'medium', {
-        returnValue: { bodyLength: bodyLen },
-        why: 'Network fetch — may be fingerprint data exfiltration'
-      });
-      return origFetch.apply(window, args);
-    };
-    if (_shield) {
-      window.fetch.toString = function() { return 'function fetch() { [native code] }'; };
-    }
-
-    const origXHROpen = XMLHttpRequest.prototype.open;
-    const origXHRSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this._sentinelUrl = String(url).slice(0, 200);
-      this._sentinelMethod = method;
-      return origXHROpen.call(this, method, url, ...rest);
-    };
-    XMLHttpRequest.prototype.send = function(body) {
-      log('network', 'xhr.send', { 
-        method: this._sentinelMethod, 
-        url: this._sentinelUrl,
-        bodySize: body ? String(body).length : 0
-      }, 'medium', {
-        why: 'XHR send — potential fingerprint data exfiltration'
-      });
-      return origXHRSend.call(this, body);
-    };
-
-    const origSendBeacon = navigator.sendBeacon;
-    if (origSendBeacon) {
-      navigator.sendBeacon = function(url, data) {
-        log('exfiltration', 'sendBeacon', { 
-          url: String(url).slice(0, 200), 
-          size: data ? (data.length || data.size || 0) : 0 
-        }, 'high', {
-          why: 'Beacon API — fire-and-forget data exfiltration, cannot be cancelled'
-        });
-        return origSendBeacon.call(navigator, url, data);
-      };
-    }
-
-    if (typeof RTCPeerConnection !== 'undefined') {
-      const origRTCPC = RTCPeerConnection;
-      window.RTCPeerConnection = function(...args) {
-        log('webrtc', 'RTCPeerConnection', { 
-          config: JSON.stringify(args[0])?.slice(0, 200) 
-        }, 'critical', {
-          why: 'WebRTC connection — can leak real IP behind VPN/proxy'
-        });
-        return new origRTCPC(...args);
-      };
-      window.RTCPeerConnection.prototype = origRTCPC.prototype;
-      if (_shield) {
-        window.RTCPeerConnection.toString = function() { return 'function RTCPeerConnection() { [native code] }'; };
-      }
-    }
-
-    // ═══ 10. PERFORMANCE TIMING ═══
-    if (performance.getEntries) {
-      const origGetEntries = performance.getEntries.bind(performance);
-      performance.getEntries = function() {
-        const result = origGetEntries();
-        log('perf-timing', 'getEntries', {}, 'medium', {
-          returnValue: { count: result.length },
-          why: 'Performance entries reveal loaded resources and timing'
-        });
-        return result;
-      };
-    }
-    if (performance.getEntriesByType) {
-      const origGetByType = performance.getEntriesByType.bind(performance);
-      performance.getEntriesByType = function(type) {
-        const result = origGetByType(type);
-        log('perf-timing', 'getEntriesByType', { type }, 'medium', {
-          returnValue: { count: result.length },
-          why: 'Performance entries by type — resource/navigation timing fingerprint'
-        });
-        return result;
-      };
-    }
-    const origPerfNow = performance.now.bind(performance);
-    let perfNowCount = 0;
-    performance.now = function() {
-      perfNowCount++;
-      const result = origPerfNow();
-      if (perfNowCount <= 5 || perfNowCount % 200 === 0) {
-        log('perf-timing', 'performance.now', { callCount: perfNowCount }, perfNowCount > 500 ? 'high' : 'low', {
-          returnValue: Math.round(result * 100) / 100,
-          why: 'High-resolution timing — used for WASM/timing-based fingerprinting'
-        });
-      }
-      return result;
-    };
-
-    // ═══ 11. MATH FINGERPRINTING ═══
-    const mathFuncs = ['acos','acosh','asin','asinh','atanh','atan','sin','sinh','cos','cosh','tan','tanh','exp','expm1','log1p'];
-    let mathCallCount = 0;
-    for (const fn of mathFuncs) {
-      if (Math[fn]) {
-        const orig = Math[fn];
-        Math[fn] = function(x) {
-          mathCallCount++;
-          const result = orig(x);
-          if (mathCallCount <= 20 || mathCallCount % 50 === 0) {
-            log('math-fingerprint', 'Math.' + fn, { input: x }, 'medium', {
-              returnValue: result,
-              why: 'Math function precision varies by JS engine/FPU — fingerprint vector'
-            });
-          }
-          return result;
-        };
-        if (_shield) {
-          Math[fn].toString = function() { return 'function ' + fn + '() { [native code] }'; };
-        }
-      }
-    }
-
-    // ═══ 12. MEDIA DEVICES ═══
-    if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-      const origEnumDev = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
-      navigator.mediaDevices.enumerateDevices = function() {
-        const result = origEnumDev();
-        result.then(devices => {
-          log('media-devices', 'enumerateDevices', {}, 'critical', {
-            returnValue: { 
-              count: devices.length, 
-              types: devices.map(d => d.kind),
-              labels: devices.map(d => d.label ? d.label.slice(0, 30) : '[no-label]')
-            },
-            why: 'Device enumeration reveals cameras/microphones — unique hardware fingerprint'
-          });
-        }).catch(() => {});
-        return result;
-      };
-    }
-
-    // ═══ 13. DOM PROBING ═══
-    const origCreateElement = document.createElement.bind(document);
-    document.createElement = function(tag, ...args) {
-      const lTag = tag?.toLowerCase?.();
-      if (['canvas', 'iframe', 'audio', 'video', 'object', 'embed'].includes(lTag)) {
-        log('dom-probe', 'createElement', { tag: lTag }, lTag === 'canvas' ? 'high' : 'medium', {
-          why: 'Dynamic element creation — canvas/iframe/audio for fingerprinting'
-        });
-      }
-      return origCreateElement(tag, ...args);
-    };
-    if (_shield) {
-      document.createElement.toString = function() { return 'function createElement() { [native code] }'; };
-    }
-
-    // ═══ 14. CLIPBOARD ═══
-    if (navigator.clipboard) {
-      if (navigator.clipboard.readText) {
-        const origRead = navigator.clipboard.readText.bind(navigator.clipboard);
-        navigator.clipboard.readText = function() {
-          log('clipboard', 'clipboard.readText', {}, 'critical', {
-            why: 'Clipboard read — accessing user private clipboard data'
-          });
-          return origRead();
-        };
-      }
-      if (navigator.clipboard.writeText) {
-        const origWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
-        navigator.clipboard.writeText = function(text) {
-          log('clipboard', 'clipboard.writeText', { size: text?.length }, 'high', {
-            why: 'Clipboard write — may inject tracking data'
-          });
-          return origWrite(text);
-        };
-      }
-    }
-
-    // ═══ 15. GEOLOCATION ═══
-    if (navigator.geolocation) {
-      const origGetPos = navigator.geolocation.getCurrentPosition;
-      navigator.geolocation.getCurrentPosition = function(...args) {
-        log('geolocation', 'getCurrentPosition', {}, 'critical', {
-          why: 'Geolocation request — precise physical location tracking'
-        });
-        return origGetPos.apply(navigator.geolocation, args);
-      };
-      const origWatchPos = navigator.geolocation.watchPosition;
-      navigator.geolocation.watchPosition = function(...args) {
-        log('geolocation', 'watchPosition', {}, 'critical', {
-          why: 'Continuous geolocation tracking'
-        });
-        return origWatchPos.apply(navigator.geolocation, args);
-      };
-    }
-
-    // ═══ 16. SERVICE WORKER ═══
-    if (navigator.serviceWorker) {
-      const origSWRegister = navigator.serviceWorker.register;
-      if (origSWRegister) {
-        navigator.serviceWorker.register = function(url, ...args) {
-          log('service-worker', 'sw.register', { url: String(url).slice(0, 100) }, 'critical', {
-            why: 'Service worker registration — persistent background code execution'
-          });
-          return origSWRegister.call(navigator.serviceWorker, url, ...args);
-        };
-      }
-    }
-
-    // ═══ 17. BATTERY API ═══
-    if (navigator.getBattery) {
-      const origGetBattery = navigator.getBattery.bind(navigator);
-      navigator.getBattery = function() {
-        const result = origGetBattery();
-        result.then(battery => {
-          log('hardware', 'getBattery', {}, 'high', {
-            returnValue: {
-              charging: battery.charging,
-              level: battery.level,
-              chargingTime: battery.chargingTime,
-              dischargingTime: battery.dischargingTime
-            },
-            why: 'Battery status reveals device state — mobile fingerprint vector'
-          });
-        }).catch(() => {});
-        return result;
-      };
-    }
-
-    // ═══ 18. DATE/TIMEZONE PROBING ═══
-    hookFn(Date.prototype, 'getTimezoneOffset', 'fingerprint', 'medium', {
-      valueFn: (v) => v,
-      why: 'Timezone offset reveals geographic region'
+  // XMLHttpRequest
+  if (typeof XMLHttpRequest !== 'undefined') {
+    hookMethod(XMLHttpRequest.prototype, 'open', 'network', 'medium', function(args) {
+      return args[0] + ' ' + String(args[1]).slice(0, 100);
     });
+    hookMethod(XMLHttpRequest.prototype, 'send', 'network', 'high', function(args) {
+      if (args[0]) record('XHR.send.data', 'exfiltration', 'high', 'bodySize=' + String(args[0]).length);
+      return '';
+    });
+  }
 
-    if (window.Intl?.DateTimeFormat) {
-      hookFn(Intl.DateTimeFormat.prototype, 'resolvedOptions', 'fingerprint', 'medium', {
-        valueFn: (v) => v ? { locale: v.locale, timeZone: v.timeZone, calendar: v.calendar } : null,
-        why: 'Intl resolved options — locale/timezone fingerprint (FPjs v5 dateTimeLocale source)'
-      });
-    }
-
-    // ═══ 19. ARCHITECTURE DETECTION ═══
-    // Float32Array precision differences reveal CPU architecture
-    const origF32Set = Float32Array.prototype.set;
-    if (origF32Set) {
-      Float32Array.prototype.set = function(...args) {
-        log('architecture', 'Float32Array.set', { len: args[0]?.length }, 'medium', {
-          why: 'Float32Array operations for CPU architecture fingerprinting'
-        });
-        return origF32Set.apply(this, args);
-      };
-    }
-
-    // ═══════════════════════════════════════════
-    //  LAYER 4: EXTENDED VECTORS (12 new categories)
-    // ═══════════════════════════════════════════
-
-    // ═══ 20. SPEECH SYNTHESIS ═══
-    if (window.speechSynthesis && window.speechSynthesis.getVoices) {
-      const origGetVoices = window.speechSynthesis.getVoices.bind(window.speechSynthesis);
-      window.speechSynthesis.getVoices = function() {
-        const voices = origGetVoices();
-        log('speech', 'speechSynthesis.getVoices', {}, 'high', {
-          returnValue: {
-            count: voices.length,
-            voices: voices.slice(0, 5).map(v => ({ name: v.name, lang: v.lang, default: v.default }))
-          },
-          why: 'Speech voice enumeration — OS/language fingerprint via installed TTS voices'
-        });
-        return voices;
-      };
-    }
-
-    // ═══ 21. CLIENT HINTS ═══
-    if (navigator.userAgentData) {
-      const origGetHighEntropy = navigator.userAgentData.getHighEntropyValues;
-      if (origGetHighEntropy) {
-        navigator.userAgentData.getHighEntropyValues = function(hints) {
-          const result = origGetHighEntropy.call(navigator.userAgentData, hints);
-          result.then(values => {
-            log('client-hints', 'getHighEntropyValues', { hints }, 'critical', {
-              returnValue: values,
-              why: 'Client Hints high-entropy — exposes OS version, CPU arch, device model, full browser version'
-            });
-          }).catch(() => {});
-          return result;
-        };
+  // fetch
+  if (typeof fetch !== 'undefined') {
+    var _origFetch = fetch;
+    window.fetch = function() {
+      var args = [];
+      for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+      var url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : 'unknown');
+      record('fetch', 'network', 'medium', 'url=' + String(url).slice(0, 100));
+      if (args[1] && args[1].body) {
+        record('fetch.body', 'exfiltration', 'high', 'method=' + (args[1].method || 'GET'));
       }
-
-      // brands getter
-      const uadDesc = Object.getOwnPropertyDescriptor(NavigatorUAData.prototype, 'brands');
-      if (uadDesc && uadDesc.get) {
-        hookGetter(NavigatorUAData.prototype, 'brands', 'client-hints', 'high', {
-          valueFn: (v) => v ? v.map(b => ({ brand: b.brand, version: b.version })) : null,
-          why: 'User-Agent brands — browser identification'
-        });
-      }
-
-      const uadPlatDesc = Object.getOwnPropertyDescriptor(NavigatorUAData.prototype, 'platform');
-      if (uadPlatDesc && uadPlatDesc.get) {
-        hookGetter(NavigatorUAData.prototype, 'platform', 'client-hints', 'high', {
-          why: 'UA-CH platform — OS identification'
-        });
-      }
-
-      const uadMobileDesc = Object.getOwnPropertyDescriptor(NavigatorUAData.prototype, 'mobile');
-      if (uadMobileDesc && uadMobileDesc.get) {
-        hookGetter(NavigatorUAData.prototype, 'mobile', 'client-hints', 'medium', {
-          why: 'UA-CH mobile flag — device type detection'
-        });
-      }
-    }
-
-    // ═══ 22. INTL EXTENDED ═══
-    if (window.Intl) {
-      if (Intl.ListFormat) {
-        hookFn(Intl.ListFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', {
-          valueFn: (v) => v,
-          why: 'Intl.ListFormat reveals locale-specific list formatting rules'
-        });
-      }
-      if (Intl.NumberFormat) {
-        hookFn(Intl.NumberFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', {
-          valueFn: (v) => v ? { locale: v.locale, numberingSystem: v.numberingSystem } : null,
-          why: 'Intl.NumberFormat exposes locale number formatting preferences'
-        });
-      }
-      if (Intl.RelativeTimeFormat) {
-        hookFn(Intl.RelativeTimeFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', {
-          valueFn: (v) => v,
-          why: 'Intl.RelativeTimeFormat reveals locale-specific time formatting'
-        });
-      }
-      if (Intl.PluralRules) {
-        hookFn(Intl.PluralRules.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', {
-          valueFn: (v) => v,
-          why: 'Intl.PluralRules exposes locale plural rules — language fingerprint'
-        });
-      }
-      if (Intl.Collator) {
-        hookFn(Intl.Collator.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', {
-          valueFn: (v) => v ? { locale: v.locale, collation: v.collation, sensitivity: v.sensitivity } : null,
-          why: 'Intl.Collator reveals locale-specific string sorting rules'
-        });
-      }
-    }
-
-    // ═══ 23. CSS.supports FINGERPRINTING ═══
-    if (window.CSS && window.CSS.supports) {
-      const origSupports = window.CSS.supports;
-      window.CSS.supports = function(...args) {
-        const result = origSupports.apply(window.CSS, args);
-        const query = args.length === 1 ? args[0] : args[0] + ': ' + args[1];
-        log('css-fingerprint', 'CSS.supports', { query }, 'medium', {
-          returnValue: result,
-          why: 'CSS feature detection — reveals browser version and rendering engine capabilities'
-        });
-        return result;
-      };
-    }
-
-    // ═══ 24. PROPERTY ENUMERATION ═══
-    // CreepJS uses Object.keys/getOwnPropertyNames to detect hook artifacts
-    const origObjKeys = Object.keys;
-    Object.keys = function(obj) {
-      const result = origObjKeys(obj);
-      // Only log suspicious targets
-      if (obj === navigator || obj === screen || obj === window) {
-        log('property-enum', 'Object.keys', { target: obj === navigator ? 'navigator' : obj === screen ? 'screen' : 'window' }, 'medium', {
-          returnValue: { count: result.length },
-          why: 'Property enumeration on sensitive objects — prototype lie detection technique'
-        });
-      }
-      return result;
+      return _origFetch.apply(window, args);
     };
-    if (_shield) {
-      Object.keys.toString = function() { return 'function keys() { [native code] }'; };
+    if (window.__sentinelShield__) {
+      window.__sentinelShield__.hookFunction(window, 'fetch', window.fetch, _origFetch);
     }
+  }
 
-    const origObjGetOwnPropertyNames = Object.getOwnPropertyNames;
-    Object.getOwnPropertyNames = function(obj) {
-      const result = origObjGetOwnPropertyNames(obj);
-      if (obj === navigator || obj === screen || obj === window || 
-          obj === Navigator.prototype || obj === Screen.prototype) {
-        log('property-enum', 'Object.getOwnPropertyNames', { 
-          target: obj.constructor?.name || 'unknown'
-        }, 'high', {
-          returnValue: { count: result.length, sample: result.slice(0, 10) },
-          why: 'Deep property inspection — lie detection for hooked prototypes'
-        });
+  // sendBeacon
+  if (navigator.sendBeacon) {
+    hookMethod(navigator, 'sendBeacon', 'exfiltration', 'critical', function(args) {
+      return 'url=' + String(args[0]).slice(0, 100);
+    });
+  }
+
+  // WebSocket
+  if (typeof WebSocket !== 'undefined') {
+    var _origWS = WebSocket;
+    window.WebSocket = function(url, protocols) {
+      record('WebSocket', 'exfiltration', 'high', 'url=' + String(url).slice(0, 100));
+      if (protocols) {
+        return new _origWS(url, protocols);
       }
-      return result;
+      return new _origWS(url);
     };
-    if (_shield) {
-      Object.getOwnPropertyNames.toString = function() { return 'function getOwnPropertyNames() { [native code] }'; };
-    }
+    window.WebSocket.prototype = _origWS.prototype;
+    window.WebSocket.CONNECTING = _origWS.CONNECTING;
+    window.WebSocket.OPEN = _origWS.OPEN;
+    window.WebSocket.CLOSING = _origWS.CLOSING;
+    window.WebSocket.CLOSED = _origWS.CLOSED;
+  }
 
-    // ═══ 25. OFFSCREEN CANVAS ═══
-    if (typeof OffscreenCanvas !== 'undefined') {
-      const origOCGetCtx = OffscreenCanvas.prototype.getContext;
-      OffscreenCanvas.prototype.getContext = function(...args) {
-        log('offscreen-canvas', 'OffscreenCanvas.getContext', { type: args[0] }, 'high', {
-          why: 'OffscreenCanvas can run in Web Workers — evades main-thread detection'
-        });
-        return origOCGetCtx.apply(this, args);
-      };
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 8: PERFORMANCE TIMING (perf-timing)
+  // ══════════════════════════════════════════════════════
 
-      const origOCTransfer = OffscreenCanvas.prototype.transferToImageBitmap;
-      if (origOCTransfer) {
-        OffscreenCanvas.prototype.transferToImageBitmap = function() {
-          log('offscreen-canvas', 'transferToImageBitmap', {}, 'high', {
-            why: 'OffscreenCanvas bitmap transfer — WebWorker canvas fingerprinting'
-          });
-          return origOCTransfer.call(this);
+  if (typeof performance !== 'undefined') {
+    hookMethod(performance, 'now', 'perf-timing', 'low');
+    hookMethod(performance, 'mark', 'perf-timing', 'low', function(args) { return 'mark=' + args[0]; });
+    hookMethod(performance, 'measure', 'perf-timing', 'medium', function(args) { return 'measure=' + args[0]; });
+    hookMethod(performance, 'getEntries', 'perf-timing', 'medium');
+    hookMethod(performance, 'getEntriesByType', 'perf-timing', 'medium', function(args) { return 'type=' + args[0]; });
+    hookMethod(performance, 'getEntriesByName', 'perf-timing', 'medium', function(args) { return 'name=' + args[0]; });
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 9: MEDIA DEVICES (media-devices)
+  // ══════════════════════════════════════════════════════
+
+  if (navigator.mediaDevices) {
+    hookMethod(navigator.mediaDevices, 'enumerateDevices', 'media-devices', 'critical');
+    hookMethod(navigator.mediaDevices, 'getUserMedia', 'media-devices', 'critical', function(args) {
+      return JSON.stringify(args[0]).slice(0, 100);
+    });
+    hookMethod(navigator.mediaDevices, 'getDisplayMedia', 'media-devices', 'critical');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 10: DOM PROBING (dom-probe)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof MutationObserver !== 'undefined') {
+    var _origMO = MutationObserver;
+    window.MutationObserver = function(callback) {
+      record('MutationObserver', 'dom-probe', 'medium', 'created');
+      return new _origMO(callback);
+    };
+    window.MutationObserver.prototype = _origMO.prototype;
+  }
+
+  if (typeof IntersectionObserver !== 'undefined') {
+    var _origIO = IntersectionObserver;
+    window.IntersectionObserver = function(callback, options) {
+      record('IntersectionObserver', 'dom-probe', 'medium', 'created');
+      return new _origIO(callback, options);
+    };
+    window.IntersectionObserver.prototype = _origIO.prototype;
+  }
+
+  hookMethod(document, 'createElement', 'dom-probe', 'low', function(args) { return 'tag=' + args[0]; });
+  hookMethod(document, 'createElementNS', 'dom-probe', 'low', function(args) { return 'ns=' + args[0] + ',tag=' + args[1]; });
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 11: CLIPBOARD (clipboard)
+  // ══════════════════════════════════════════════════════
+
+  if (navigator.clipboard) {
+    hookMethod(navigator.clipboard, 'readText', 'clipboard', 'critical');
+    hookMethod(navigator.clipboard, 'writeText', 'clipboard', 'critical');
+    hookMethod(navigator.clipboard, 'read', 'clipboard', 'critical');
+    hookMethod(navigator.clipboard, 'write', 'clipboard', 'critical');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 12: GEOLOCATION (geolocation)
+  // ══════════════════════════════════════════════════════
+
+  if (navigator.geolocation) {
+    hookMethod(navigator.geolocation, 'getCurrentPosition', 'geolocation', 'critical');
+    hookMethod(navigator.geolocation, 'watchPosition', 'geolocation', 'critical');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 13: SERVICE WORKER (service-worker)
+  // ══════════════════════════════════════════════════════
+
+  if (navigator.serviceWorker) {
+    hookMethod(navigator.serviceWorker, 'register', 'service-worker', 'high', function(args) {
+      return 'url=' + String(args[0]).slice(0, 100);
+    });
+    hookMethod(navigator.serviceWorker, 'getRegistration', 'service-worker', 'medium');
+    hookMethod(navigator.serviceWorker, 'getRegistrations', 'service-worker', 'medium');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 14: HARDWARE (hardware)
+  // ══════════════════════════════════════════════════════
+
+  hookGetter(navigator, 'hardwareConcurrency', 'hardware', 'high', 'navigator.hardwareConcurrency');
+  hookGetter(navigator, 'deviceMemory', 'hardware', 'high', 'navigator.deviceMemory');
+  hookGetter(navigator, 'platform', 'hardware', 'medium', 'navigator.platform');
+  hookGetter(navigator, 'maxTouchPoints', 'hardware', 'medium', 'navigator.maxTouchPoints');
+  hookGetter(navigator, 'vendor', 'hardware', 'low', 'navigator.vendor');
+  hookGetter(navigator, 'userAgent', 'hardware', 'low', 'navigator.userAgent');
+  hookGetter(navigator, 'appVersion', 'hardware', 'low', 'navigator.appVersion');
+  hookGetter(navigator, 'product', 'hardware', 'low', 'navigator.product');
+  hookGetter(navigator, 'productSub', 'hardware', 'low', 'navigator.productSub');
+  hookGetter(navigator, 'vendorSub', 'hardware', 'low', 'navigator.vendorSub');
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 15: WEBRTC (webrtc)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof RTCPeerConnection !== 'undefined') {
+    var _origRTC = RTCPeerConnection;
+    window.RTCPeerConnection = function(config) {
+      record('RTCPeerConnection', 'webrtc', 'critical', 'config=' + JSON.stringify(config || {}).slice(0, 100));
+      var pc = new _origRTC(config);
+
+      // Hook createDataChannel
+      var _origCreateDC = pc.createDataChannel;
+      if (_origCreateDC) {
+        pc.createDataChannel = function() {
+          var args = [];
+          for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+          record('RTCPeerConnection.createDataChannel', 'webrtc', 'high', 'label=' + args[0]);
+          return _origCreateDC.apply(pc, args);
         };
       }
 
-      const origOCConvertToBlob = OffscreenCanvas.prototype.convertToBlob;
-      if (origOCConvertToBlob) {
-        OffscreenCanvas.prototype.convertToBlob = function(...args) {
-          log('offscreen-canvas', 'convertToBlob', { type: args[0]?.type }, 'high', {
-            why: 'OffscreenCanvas blob export for fingerprint hashing'
-          });
-          return origOCConvertToBlob.apply(this, args);
+      // Hook createOffer
+      var _origCreateOffer = pc.createOffer;
+      if (_origCreateOffer) {
+        pc.createOffer = function() {
+          var args = [];
+          for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+          record('RTCPeerConnection.createOffer', 'webrtc', 'high', '');
+          return _origCreateOffer.apply(pc, args);
         };
       }
-    }
 
-    // ═══ 26. WEBSOCKET MONITORING ═══
-    if (typeof WebSocket !== 'undefined') {
-      const origWS = WebSocket;
-      window.WebSocket = function(url, ...args) {
-        log('exfiltration', 'WebSocket', { url: String(url).slice(0, 200) }, 'high', {
-          why: 'WebSocket connection — potential real-time fingerprint data exfiltration channel'
-        });
-        return new origWS(url, ...args);
-      };
-      window.WebSocket.prototype = origWS.prototype;
-      window.WebSocket.CONNECTING = origWS.CONNECTING;
-      window.WebSocket.OPEN = origWS.OPEN;
-      window.WebSocket.CLOSING = origWS.CLOSING;
-      window.WebSocket.CLOSED = origWS.CLOSED;
-    }
-
-    // ═══ 27. IMAGE-BASED EXFILTRATION ═══
-    const origImageSrc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
-    if (origImageSrc && origImageSrc.set) {
-      const origSrcSet = origImageSrc.set;
-      Object.defineProperty(HTMLImageElement.prototype, 'src', {
-        get: origImageSrc.get,
-        set: function(val) {
-          const url = String(val);
-          // Detect tracking pixels and data exfil via image
-          if (/collect|pixel|track|beacon|telemetry|log|fp|fingerprint/i.test(url) || 
-              url.includes('?') && url.length > 200) {
-            log('exfiltration', 'img.src', { url: url.slice(0, 200) }, 'high', {
-              why: 'Tracking pixel — fingerprint data exfiltration via image request'
-            });
-          }
-          return origSrcSet.call(this, val);
+      // Monitor ICE candidates
+      var _origOnIce = null;
+      Object.defineProperty(pc, 'onicecandidate', {
+        get: function() { return _origOnIce; },
+        set: function(fn) {
+          _origOnIce = function(event) {
+            if (event && event.candidate) {
+              record('RTCPeerConnection.onicecandidate', 'webrtc', 'critical',
+                'candidate=' + String(event.candidate.candidate).slice(0, 100));
+            }
+            if (fn) fn(event);
+          };
         },
-        enumerable: true,
         configurable: true
       });
-    }
 
-    // ═══ 28. MUTATION OBSERVER ═══
-    if (typeof MutationObserver !== 'undefined') {
-      const origMO = MutationObserver;
-      window.MutationObserver = function(callback) {
-        log('dom-probe', 'MutationObserver', {}, 'low', {
-          why: 'DOM mutation monitoring — may detect DOM-based fingerprint activities'
+      return pc;
+    };
+    window.RTCPeerConnection.prototype = _origRTC.prototype;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 16: MATH FINGERPRINT (math-fingerprint)
+  // ══════════════════════════════════════════════════════
+
+  var mathMethods = ['acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'atan2',
+    'cos', 'cosh', 'sin', 'sinh', 'tan', 'tanh', 'exp', 'expm1',
+    'log', 'log1p', 'log2', 'log10', 'sqrt', 'cbrt', 'hypot',
+    'fround', 'clz32', 'trunc', 'sign'];
+
+  for (var mm = 0; mm < mathMethods.length; mm++) {
+    (function(method) {
+      if (typeof Math[method] === 'function') {
+        hookMethod(Math, method, 'math-fingerprint', 'medium', function(args) {
+          return method + '(' + args.slice(0, 2).join(',') + ')';
         });
-        return new origMO(callback);
-      };
-      window.MutationObserver.prototype = origMO.prototype;
-    }
-
-    // ═══ 29. INTERSECTION OBSERVER ═══
-    if (typeof IntersectionObserver !== 'undefined') {
-      const origIO = IntersectionObserver;
-      window.IntersectionObserver = function(callback, options) {
-        log('dom-probe', 'IntersectionObserver', { 
-          threshold: options?.threshold 
-        }, 'low', {
-          why: 'Intersection observation — may detect hidden fingerprinting elements'
-        });
-        return new origIO(callback, options);
-      };
-      window.IntersectionObserver.prototype = origIO.prototype;
-    }
-
-    // ═══ 30. GAMEPAD API ═══
-    if (navigator.getGamepads) {
-      const origGetGamepads = navigator.getGamepads.bind(navigator);
-      navigator.getGamepads = function() {
-        const result = origGetGamepads();
-        log('hardware', 'navigator.getGamepads', {}, 'medium', {
-          returnValue: { count: result ? Array.from(result).filter(Boolean).length : 0 },
-          why: 'Gamepad enumeration — hardware peripheral fingerprinting'
-        });
-        return result;
-      };
-    }
-
-    // ═══ 31. CREDENTIAL MANAGEMENT ═══
-    if (navigator.credentials) {
-      if (navigator.credentials.get) {
-        const origCredGet = navigator.credentials.get.bind(navigator.credentials);
-        navigator.credentials.get = function(options) {
-          log('credential', 'credentials.get', { 
-            types: options ? Object.keys(options).join(',') : 'none' 
-          }, 'critical', {
-            why: 'Credential access request — potential authentication data extraction'
-          });
-          return origCredGet(options);
-        };
       }
-      if (navigator.credentials.create) {
-        const origCredCreate = navigator.credentials.create.bind(navigator.credentials);
-        navigator.credentials.create = function(options) {
-          log('credential', 'credentials.create', {
-            types: options ? Object.keys(options).join(',') : 'none'
-          }, 'high', {
-            why: 'Credential creation — WebAuthn/passkey fingerprint vector'
-          });
-          return origCredCreate(options);
-        };
-      }
+    })(mathMethods[mm]);
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 17: PERMISSIONS (permissions)
+  // ══════════════════════════════════════════════════════
+
+  if (navigator.permissions) {
+    hookMethod(navigator.permissions, 'query', 'permissions', 'high', function(args) {
+      return 'name=' + (args[0] && args[0].name ? args[0].name : 'unknown');
+    });
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 18: SPEECH (speech)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof speechSynthesis !== 'undefined') {
+    hookMethod(speechSynthesis, 'getVoices', 'speech', 'high');
+    hookMethod(speechSynthesis, 'speak', 'speech', 'medium');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 19: CLIENT HINTS (client-hints)
+  // ══════════════════════════════════════════════════════
+
+  if (navigator.userAgentData) {
+    hookMethod(navigator.userAgentData, 'getHighEntropyValues', 'client-hints', 'critical', function(args) {
+      return 'hints=' + (args[0] || []).join(',');
+    });
+    hookGetter(navigator.userAgentData, 'brands', 'client-hints', 'medium', 'navigator.userAgentData.brands');
+    hookGetter(navigator.userAgentData, 'mobile', 'client-hints', 'medium', 'navigator.userAgentData.mobile');
+    hookGetter(navigator.userAgentData, 'platform', 'client-hints', 'medium', 'navigator.userAgentData.platform');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 20: INTL FINGERPRINT (intl-fingerprint)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof Intl !== 'undefined') {
+    if (Intl.DateTimeFormat) {
+      hookMethod(Intl.DateTimeFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium');
     }
+    if (Intl.NumberFormat) {
+      hookMethod(Intl.NumberFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium');
+    }
+    if (Intl.Collator) {
+      hookMethod(Intl.Collator.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium');
+    }
+    if (Intl.ListFormat) {
+      hookMethod(Intl.ListFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'high');
+    }
+    if (Intl.RelativeTimeFormat) {
+      hookMethod(Intl.RelativeTimeFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'high');
+    }
+    if (Intl.PluralRules) {
+      hookMethod(Intl.PluralRules.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium');
+    }
+  }
 
-    // ═══ HONEYPOT PROPERTIES ═══
-    // Plant fake high-value properties. Any access = definitely fingerprinting
-    const honeypotProps = [
-      { target: navigator, prop: '__fpjs_d_m', cat: 'honeypot' },
-      { target: window, prop: '__selenium_evaluate', cat: 'honeypot' },
-      { target: window, prop: '__fxdriver_evaluate', cat: 'honeypot' },
-      { target: document, prop: '__selenium_unwrapped', cat: 'honeypot' },
-    ];
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 21: CSS FINGERPRINT (css-fingerprint)
+  // ══════════════════════════════════════════════════════
 
-    for (const hp of honeypotProps) {
+  if (typeof CSS !== 'undefined' && CSS.supports) {
+    hookMethod(CSS, 'supports', 'css-fingerprint', 'medium', function(args) {
+      return args.join(' ').slice(0, 80);
+    });
+  }
+
+  if (typeof getComputedStyle !== 'undefined') {
+    hookMethod(window, 'getComputedStyle', 'css-fingerprint', 'low');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 22: PROPERTY ENUMERATION (property-enum)
+  // ══════════════════════════════════════════════════════
+
+  var _origObjKeys = Object.keys;
+  Object.keys = function(obj) {
+    if (obj === navigator || obj === screen || obj === window ||
+        (typeof Navigator !== 'undefined' && obj === Navigator.prototype) ||
+        (typeof Screen !== 'undefined' && obj === Screen.prototype)) {
+      record('Object.keys', 'property-enum', 'high', 'target=' + (obj === navigator ? 'navigator' : obj === screen ? 'screen' : 'window'));
+    }
+    return _origObjKeys.call(Object, obj);
+  };
+
+  var _origGetOwnPropNames = Object.getOwnPropertyNames;
+  Object.getOwnPropertyNames = function(obj) {
+    if (obj === navigator || obj === screen || obj === window ||
+        (typeof Navigator !== 'undefined' && obj === Navigator.prototype) ||
+        (typeof Screen !== 'undefined' && obj === Screen.prototype)) {
+      record('Object.getOwnPropertyNames', 'property-enum', 'high', 'target=' + (obj === navigator ? 'navigator' : obj === screen ? 'screen' : 'window'));
+    }
+    return _origGetOwnPropNames.call(Object, obj);
+  };
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 23: OFFSCREEN CANVAS (offscreen-canvas)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof OffscreenCanvas !== 'undefined') {
+    var _origOC = OffscreenCanvas;
+    window.OffscreenCanvas = function(w, h) {
+      record('OffscreenCanvas', 'offscreen-canvas', 'high', 'size=' + w + 'x' + h);
+      return new _origOC(w, h);
+    };
+    window.OffscreenCanvas.prototype = _origOC.prototype;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 24: HONEYPOT (honeypot)
+  // ══════════════════════════════════════════════════════
+
+  var honeypotProps = [
+    { obj: navigator, name: '__fingerprint', label: 'navigator.__fingerprint' },
+    { obj: navigator, name: 'buildID', label: 'navigator.buildID' },
+    { obj: window, name: '__nightmare', label: 'window.__nightmare' },
+    { obj: window, name: '_phantom', label: 'window._phantom' },
+    { obj: window, name: '__selenium_unwrapped', label: 'window.__selenium_unwrapped' },
+    { obj: window, name: 'callPhantom', label: 'window.callPhantom' },
+    { obj: window, name: '_Recaptcha', label: 'window._Recaptcha' },
+    { obj: document, name: '__webdriver_evaluate', label: 'document.__webdriver_evaluate' },
+    { obj: document, name: '__driver_evaluate', label: 'document.__driver_evaluate' }
+  ];
+
+  for (var hp = 0; hp < honeypotProps.length; hp++) {
+    (function(trap) {
       try {
-        Object.defineProperty(hp.target, hp.prop, {
+        Object.defineProperty(trap.obj, trap.name, {
           get: function() {
-            log('honeypot', hp.prop, {}, 'critical', {
-              why: 'Honeypot property accessed — confirms active fingerprinting/bot-detection probing'
-            });
+            record(trap.label, 'honeypot', 'critical', 'Honeypot property accessed!');
             return undefined;
           },
-          set: function() {},
+          set: function() {
+            record(trap.label + '.set', 'honeypot', 'critical', 'Honeypot property written!');
+          },
           configurable: true,
-          enumerable: false // Hidden from Object.keys but accessible by name
+          enumerable: false
         });
       } catch(e) {}
-    }
+    })(honeypotProps[hp]);
+  }
 
-    // ═══ UTILITY: Simple string hash ═══
-    function hashStr(str) {
-      let hash = 0;
-      for (let i = 0; i < Math.min(str.length, 1000); i++) {
-        const chr = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + chr;
-        hash |= 0;
-      }
-      return Math.abs(hash).toString(36);
-    }
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 25: CREDENTIAL (credential)
+  // ══════════════════════════════════════════════════════
 
-    // ═══ BOOT_OK PROTOCOL ═══
-    // Mandatory event to prove this context is being monitored
-    _sentinel.bootOk = true;
-    log('system', 'BOOT_OK', {
-      frameId: _sentinel.frameId,
-      url: location.href,
-      origin: location.origin,
-      isTop: window === window.top,
-      timestamp: Date.now()
-    }, 'info', {
-      why: 'Coverage proof — confirms Sentinel is active in this execution context'
+  if (navigator.credentials) {
+    hookMethod(navigator.credentials, 'get', 'credential', 'critical', function(args) {
+      return JSON.stringify(args[0] || {}).slice(0, 100);
     });
+    hookMethod(navigator.credentials, 'create', 'credential', 'critical', function(args) {
+      return JSON.stringify(args[0] || {}).slice(0, 100);
+    });
+    hookMethod(navigator.credentials, 'store', 'credential', 'high');
+  }
 
-    // ═══ GLOBAL EXPORT ═══
-    window.__SENTINEL_DATA__ = _sentinel;
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 26: ENCODING (encoding)
+  // ══════════════════════════════════════════════════════
 
-    // Context map
-    window.__SENTINEL_CONTEXT_MAP__ = [{
-      type: 'page',
-      url: location.href,
-      origin: location.origin,
-      frameId: _sentinel.frameId,
-      bootOk: true,
-      timestamp: Date.now()
-    }];
+  if (typeof TextEncoder !== 'undefined') {
+    hookMethod(TextEncoder.prototype, 'encode', 'encoding', 'low');
+    hookMethod(TextEncoder.prototype, 'encodeInto', 'encoding', 'low');
+  }
 
-    // ═══ PUSH TELEMETRY via Runtime.addBinding (if available) ═══
-    if (typeof window.__SENTINEL_PUSH__ === 'function') {
-      // Push events periodically to Node.js via CDP Runtime.addBinding
-      setInterval(() => {
-        if (_sentinel.events.length > 0) {
-          try {
-            const batch = _sentinel.events.splice(0, 500);
-            window.__SENTINEL_PUSH__(JSON.stringify({
-              type: 'event_batch',
-              frameId: _sentinel.frameId,
-              origin: location.origin,
-              url: location.href,
-              events: batch
-            }));
-          } catch(e) {}
-        }
-      }, 1000);
+  if (typeof TextDecoder !== 'undefined') {
+    hookMethod(TextDecoder.prototype, 'decode', 'encoding', 'low');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 27: WEBASSEMBLY (webassembly)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof WebAssembly !== 'undefined') {
+    if (WebAssembly.compile) {
+      hookMethod(WebAssembly, 'compile', 'webassembly', 'critical');
     }
+    if (WebAssembly.instantiate) {
+      hookMethod(WebAssembly, 'instantiate', 'webassembly', 'critical');
+    }
+    if (WebAssembly.validate) {
+      hookMethod(WebAssembly, 'validate', 'webassembly', 'high');
+    }
+    if (WebAssembly.compileStreaming) {
+      hookMethod(WebAssembly, 'compileStreaming', 'webassembly', 'critical');
+    }
+    if (WebAssembly.instantiateStreaming) {
+      hookMethod(WebAssembly, 'instantiateStreaming', 'webassembly', 'critical');
+    }
+  }
 
-    console.log('[Sentinel v4] Forensic Maling Catcher active — monitoring 31 categories | Frame: ' + _sentinel.frameId);
-  })();
-  `;
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 28: KEYBOARD LAYOUT (keyboard-layout)
+  // ══════════════════════════════════════════════════════
+
+  if (navigator.keyboard) {
+    hookMethod(navigator.keyboard, 'getLayoutMap', 'keyboard-layout', 'high');
+    hookMethod(navigator.keyboard, 'lock', 'keyboard-layout', 'high');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 29: SENSOR APIS (sensor-apis)
+  // ══════════════════════════════════════════════════════
+
+  var sensorTypes = ['Accelerometer', 'Gyroscope', 'Magnetometer',
+    'AbsoluteOrientationSensor', 'RelativeOrientationSensor',
+    'AmbientLightSensor', 'LinearAccelerationSensor', 'GravitySensor'];
+
+  for (var st = 0; st < sensorTypes.length; st++) {
+    (function(sensorName) {
+      if (typeof window[sensorName] !== 'undefined') {
+        var _origSensor = window[sensorName];
+        window[sensorName] = function(options) {
+          record(sensorName, 'sensor-apis', 'high', 'frequency=' + (options && options.frequency ? options.frequency : 'default'));
+          return new _origSensor(options);
+        };
+        window[sensorName].prototype = _origSensor.prototype;
+      }
+    })(sensorTypes[st]);
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 30: VISUALIZATION / GPU (visualization)
+  // ══════════════════════════════════════════════════════
+
+  hookMethod(window, 'requestAnimationFrame', 'visualization', 'low');
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 31: DEVICE INFO (device-info)
+  // ══════════════════════════════════════════════════════
+
+  hookGetter(navigator, 'connection', 'device-info', 'medium', 'navigator.connection');
+
+  if (navigator.getBattery) {
+    hookMethod(navigator, 'getBattery', 'device-info', 'high');
+  }
+
+  hookGetter(navigator, 'doNotTrack', 'device-info', 'medium', 'navigator.doNotTrack');
+  hookGetter(navigator, 'cookieEnabled', 'device-info', 'low', 'navigator.cookieEnabled');
+  hookGetter(navigator, 'onLine', 'device-info', 'low', 'navigator.onLine');
+  hookGetter(navigator, 'pdfViewerEnabled', 'device-info', 'low', 'navigator.pdfViewerEnabled');
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 32: WORKER (worker)
+  // ══════════════════════════════════════════════════════
+
+  if (typeof Worker !== 'undefined') {
+    var _origWorker = Worker;
+    window.Worker = function(url, options) {
+      record('Worker', 'worker', 'high', 'url=' + String(url).slice(0, 100));
+      if (options) {
+        return new _origWorker(url, options);
+      }
+      return new _origWorker(url);
+    };
+    window.Worker.prototype = _origWorker.prototype;
+  }
+
+  if (typeof SharedWorker !== 'undefined') {
+    var _origSW = SharedWorker;
+    window.SharedWorker = function(url, options) {
+      record('SharedWorker', 'worker', 'high', 'url=' + String(url).slice(0, 100));
+      if (options) {
+        return new _origSW(url, options);
+      }
+      return new _origSW(url);
+    };
+    window.SharedWorker.prototype = _origSW.prototype;
+  }
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 33: FINGERPRINT (general fingerprint)
+  // ══════════════════════════════════════════════════════
+
+  hookGetter(navigator, 'languages', 'fingerprint', 'medium', 'navigator.languages');
+  hookGetter(navigator, 'language', 'fingerprint', 'low', 'navigator.language');
+  hookGetter(navigator, 'plugins', 'fingerprint', 'medium', 'navigator.plugins');
+  hookGetter(navigator, 'mimeTypes', 'fingerprint', 'medium', 'navigator.mimeTypes');
+
+  // Date/timezone fingerprinting
+  var _origGetTZOffset = Date.prototype.getTimezoneOffset;
+  Date.prototype.getTimezoneOffset = function() {
+    record('Date.getTimezoneOffset', 'fingerprint', 'medium', '');
+    return _origGetTZOffset.call(this);
+  };
+
+  // ══════════════════════════════════════════════════════
+  // CATEGORY 34-37: BATTERY, BLUETOOTH, EventSource, Image tracking
+  // ══════════════════════════════════════════════════════
+
+  // Image-based tracking pixel detection
+  if (typeof Image !== 'undefined') {
+    var _origImage = Image;
+    window.Image = function(w, h) {
+      var img = new _origImage(w, h);
+      var _origSrcDesc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+      if (_origSrcDesc && _origSrcDesc.set) {
+        var _origSrcSet = _origSrcDesc.set;
+        try {
+          Object.defineProperty(img, 'src', {
+            get: function() { return _origSrcDesc.get.call(img); },
+            set: function(val) {
+              var url = String(val).slice(0, 100);
+              if (url.indexOf('?') !== -1 || url.indexOf('pixel') !== -1 || url.indexOf('track') !== -1 || url.indexOf('beacon') !== -1) {
+                record('Image.src.tracking', 'exfiltration', 'high', 'url=' + url);
+              }
+              return _origSrcSet.call(img, val);
+            },
+            configurable: true
+          });
+        } catch(e) {}
+      }
+      return img;
+    };
+    window.Image.prototype = _origImage.prototype;
+  }
+
+  // EventSource
+  if (typeof EventSource !== 'undefined') {
+    var _origES = EventSource;
+    window.EventSource = function(url, options) {
+      record('EventSource', 'network', 'high', 'url=' + String(url).slice(0, 100));
+      if (options) {
+        return new _origES(url, options);
+      }
+      return new _origES(url);
+    };
+    window.EventSource.prototype = _origES.prototype;
+  }
+
+  // Bluetooth
+  if (navigator.bluetooth) {
+    hookMethod(navigator.bluetooth, 'requestDevice', 'device-info', 'critical');
+    hookMethod(navigator.bluetooth, 'getAvailability', 'device-info', 'high');
+  }
+
+  // ══════════════════════════════════════════════════════
+  // SYSTEM: Mark injection complete
+  // ══════════════════════════════════════════════════════
+
+  record('SENTINEL_INTERCEPTOR_READY', 'system', 'info', 'All hooks installed — 37 categories active');
+
+})();
+`;
 }
 
 module.exports = { getInterceptorScript };
