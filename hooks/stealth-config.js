@@ -1,123 +1,136 @@
-/**
- * Sentinel v3 — Stealth Configuration Manager
- * Manages stealth plugin evasions for realistic browser simulation
- */
+// Sentinel v4.4.2 — Stealth Config (Layer 4)
+// NO UA/fingerprint spoofing — only clean automation markers
+// Purpose: remove obvious Playwright/automation signals so monitoring isn't detected
 
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-
-/**
- * Create stealth plugin with all 17 evasions enabled (default)
- * Plus extra hardening for advanced bot-detection bypass
- */
-function createStealthPlugin(options = {}) {
-  const stealth = StealthPlugin();
-
-  // By default all evasions are ON. User can disable specific ones:
-  // chrome.app, chrome.csi, chrome.loadTimes, chrome.runtime,
-  // defaultArgs, iframe.contentWindow, media.codecs,
-  // navigator.hardwareConcurrency, navigator.languages,
-  // navigator.permissions, navigator.plugins, navigator.vendor,
-  // navigator.webdriver, sourceurl, user-agent-override,
-  // webgl.vendor, window.outerdimensions
-
-  if (options.disableEvasions && Array.isArray(options.disableEvasions)) {
-    for (const evasion of options.disableEvasions) {
-      stealth.enabledEvasions.delete(evasion);
-    }
-  }
-
-  return stealth;
-}
-
-/**
- * Extra stealth hardening — injected as page script
- * Covers vectors NOT handled by stealth plugin:
- * - Permissions API spoofing
- * - WebDriver property deep cleanup
- * - Chrome DevTools Protocol leak prevention
- * - navigator.connection spoofing
- * - Battery API spoofing
- */
-function getExtraStealthScript() {
+function getStealthPatches(options) {
+  var opts = options || {};
   return `
-    // ═══ EXTRA STEALTH LAYER ═══
+(function() {
+  'use strict';
+  if (window.__SENTINEL_STEALTH_APPLIED) return;
+  window.__SENTINEL_STEALTH_APPLIED = true;
 
-    // 1. Deep webdriver cleanup (beyond stealth plugin)
+  // === CLEANUP AUTOMATION MARKERS ONLY ===
+  // These are Playwright/CDP artifacts, not fingerprint spoofing
+
+  // 1. navigator.webdriver — Playwright sets this to true
+  try {
     Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
+      get: function() { return false; },
       configurable: true
     });
+  } catch(e) {}
 
-    // Remove automation indicators from window
-    delete window.__playwright;
-    delete window.__pw_manual;
-    delete window.__PW_inspect;
-
-    // 2. Permissions API — return "prompt" for common permissions
-    if (navigator.permissions) {
-      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = async (desc) => {
-        if (['notifications', 'push', 'midi', 'camera', 'microphone',
-             'speaker', 'device-info', 'background-fetch', 'background-sync',
-             'bluetooth', 'persistent-storage', 'ambient-light-sensor',
-             'accelerometer', 'gyroscope', 'magnetometer', 'clipboard-read',
-             'clipboard-write', 'payment-handler', 'idle-detection',
-             'periodic-background-sync', 'screen-wake-lock', 'nfc'
-        ].includes(desc.name)) {
-          return { state: 'prompt', onchange: null };
-        }
-        return originalQuery(desc);
-      };
+  // 2. Remove cdc_ variables (CDP leak markers)
+  try {
+    var cdcKeys = [];
+    for (var key in document) {
+      if (key.match(/^\\$cdc_|^cdc_|^\\$chrome_/)) cdcKeys.push(key);
     }
+    for (var i = 0; i < cdcKeys.length; i++) {
+      try { delete document[cdcKeys[i]]; } catch(e) {}
+    }
+  } catch(e) {}
 
-    // 3. Chrome runtime — ensure window.chrome exists properly
+  // 3. Chrome runtime (missing in Playwright = detection signal)
+  try {
     if (!window.chrome) {
       window.chrome = {};
     }
     if (!window.chrome.runtime) {
       window.chrome.runtime = {
-        connect: () => {},
-        sendMessage: () => {},
+        connect: function() { return {}; },
+        sendMessage: function() {},
         id: undefined
       };
     }
+  } catch(e) {}
 
-    // 4. Connection API spoofing
-    if (navigator.connection) {
-      Object.defineProperty(navigator.connection, 'rtt', { get: () => 50, configurable: true });
-      Object.defineProperty(navigator.connection, 'downlink', { get: () => 10, configurable: true });
-      Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g', configurable: true });
+  // 4. Remove "Chrome is being controlled by automated test software" flag
+  try {
+    if (navigator.permissions) {
+      var origQuery = navigator.permissions.query;
+      navigator.permissions.query = function(parameters) {
+        if (parameters.name === 'notifications') {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return origQuery.call(this, parameters);
+      };
     }
+  } catch(e) {}
 
-    // 5. Notification permission — avoid "denied" (suspicious for real user)
-    if (window.Notification) {
-      Object.defineProperty(Notification, 'permission', {
-        get: () => 'default',
+  // 5. Plugins array — Playwright has empty plugins (detection signal)
+  try {
+    if (navigator.plugins.length === 0) {
+      Object.defineProperty(navigator, 'plugins', {
+        get: function() {
+          return [
+            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+          ];
+        },
         configurable: true
       });
     }
+  } catch(e) {}
 
-    // 6. Prevent detection of automation via stack trace analysis
-    const origError = Error;
-    const origPrepare = Error.prepareStackTrace;
-    // Cleanup puppeteer/playwright traces from stack
-    Error.prepareStackTrace = function(error, stack) {
-      const filtered = stack.filter(frame => {
-        const file = frame.getFileName() || '';
-        return !file.includes('puppeteer') &&
-               !file.includes('playwright') &&
-               !file.includes('pptr:') &&
-               !file.includes('__puppeteer');
+  // 6. MimeTypes — consistent with plugins
+  try {
+    if (navigator.mimeTypes.length === 0) {
+      Object.defineProperty(navigator, 'mimeTypes', {
+        get: function() {
+          return [
+            { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format', enabledPlugin: navigator.plugins[0] }
+          ];
+        },
+        configurable: true
       });
-      if (origPrepare) return origPrepare(error, filtered);
-      return error.toString() + '\\n' + filtered.map(f =>
-        '    at ' + f.toString()
-      ).join('\\n');
-    };
+    }
+  } catch(e) {}
 
-    // 7. SourceURL cleanup (complement to stealth plugin)
-    // Prevent leaking injected script source URLs
-  `;
+  // 7. Clean window.navigator.connection if missing
+  try {
+    if (!navigator.connection) {
+      Object.defineProperty(navigator, 'connection', {
+        get: function() {
+          return {
+            effectiveType: '4g',
+            rtt: 50,
+            downlink: 10,
+            saveData: false,
+            type: 'wifi'
+          };
+        },
+        configurable: true
+      });
+    }
+  } catch(e) {}
+
+})();
+`;
 }
 
-module.exports = { createStealthPlugin, getExtraStealthScript };
+function getStealthPluginConfig() {
+  // Return configuration for playwright-extra stealth plugin
+  return {
+    enabledEvasions: new Set([
+      'chrome.app',
+      'chrome.csi',
+      'chrome.loadTimes',
+      'chrome.runtime',
+      'navigator.hardwareConcurrency',
+      'navigator.languages',
+      'navigator.permissions',
+      'navigator.plugins',
+      'navigator.webdriver',
+      'sourceurl',
+      'user-agent-override',
+      'webgl.vendor',
+      'window.outerdimensions',
+      'media.codecs'
+    ])
+  };
+}
+
+module.exports = { getStealthPatches, getStealthPluginConfig };
