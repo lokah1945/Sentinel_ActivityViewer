@@ -1,5 +1,5 @@
 /**
- * Sentinel v4.6.1 — Forensic Report Generator
+ * Sentinel v4.6.2 — Forensic Report Generator
  * Ghost Protocol | 37 Categories | 1H5W Framework | Zero Spoofing
  *
  * FIXES from v4.6:
@@ -30,7 +30,7 @@ function generateReport(sentinelData, frameInfo, targetUrl, options) {
 
   var events = sentinelData.events || [];
 
-  // FIX v4.6.1: Sort events by timestamp for consistent analysis
+  // FIX v4.6.2: Sort events by timestamp for consistent analysis
   events.sort(function(a, b) { return (Number(a.ts) || 0) - (Number(b.ts) || 0); });
 
   // ── Correlation Engine Analysis ──
@@ -101,14 +101,14 @@ function generateReport(sentinelData, frameInfo, targetUrl, options) {
   var activeCategories = coverageMatrix.filter(function(c) { return c.status === 'ACTIVE'; }).length;
   var coveragePercent = Math.round((activeCategories / ALL_CATEGORIES.length) * 100 * 10) / 10;
 
-  // ── FIX v4.6.1: timeSpanMs from MAX timestamp ──
+  // ── FIX v4.6.2: timeSpanMs from MAX timestamp ──
   var maxTs = 0;
   for (var i = 0; i < events.length; i++) {
     var ts = Number(events[i].ts) || 0;
     if (ts > maxTs) maxTs = ts;
   }
 
-  // ── FIX v4.6.1: Coverage Proof with proper frame inventory ──
+  // ── FIX v4.6.2: Coverage Proof with proper frame inventory ──
   var monitoredFrames = [];
   var unmonitoredFrames = [];
 
@@ -309,7 +309,7 @@ function generateReport(sentinelData, frameInfo, targetUrl, options) {
 
   // ── Build report JSON ──
   var reportJson = {
-    version: '4.6.1',
+    version: '4.6.2',
     mode: mode,
     ghostProtocol: true,
     zeroSpoofing: true,
@@ -446,7 +446,7 @@ function generateHtmlReport(report, correlation, exfiltrationEntries, networkCon
   var riskClass = report.riskScore >= 80 ? 'risk-danger' : report.riskScore >= 50 ? 'risk-warning' : 'risk-safe';
   var timelineData = JSON.stringify(report.timeline || {});
 
-  return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sentinel v4.6.1 Ghost Protocol Report</title>' +
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sentinel v4.6.2 Ghost Protocol Report</title>' +
     '<style>' +
     'body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:20px;background:#0a0a0a;color:#e0e0e0}' +
     '.container{max-width:1400px;margin:0 auto}' +
@@ -469,7 +469,7 @@ function generateHtmlReport(report, correlation, exfiltrationEntries, networkCon
     'code{background:#1a1a2e;padding:1px 4px;border-radius:3px;font-size:12px;color:#00ff88}' +
     '.ghost-badge{background:linear-gradient(135deg,#00ff88,#00ccff);color:#000;padding:4px 12px;border-radius:12px;font-size:11px;font-weight:bold}' +
     '</style></head><body><div class="container">' +
-    '<h1>🛡️ SENTINEL v4.6.1 GHOST PROTOCOL <span class="ghost-badge">GHOST</span></h1>' +
+    '<h1>🛡️ SENTINEL v4.6.2 GHOST PROTOCOL <span class="ghost-badge">GHOST</span></h1>' +
     '<p style="text-align:center;color:#888">' + escapeHtml(report.targetUrl) + ' — ' + report.timestamp + ' — ' + report.mode + ' mode</p>' +
     '<div style="text-align:center;margin:16px 0"><span class="' + riskClass + '">' + report.riskScore + '/100 ' + report.riskLevel + '</span></div>' +
 
@@ -507,7 +507,7 @@ function generateHtmlReport(report, correlation, exfiltrationEntries, networkCon
     (exfilRows ? '<h2>📡 Data Exfiltration</h2><table><tr><th>Tracker</th><th>Method</th><th>URL</th><th>Time</th></tr>' + exfilRows + '</table>' : '') +
 
     // Target Graph
-    '<h2>🎯 Target Graph & Inventory (v4.6.1)</h2>' +
+    '<h2>🎯 Target Graph & Inventory (v4.6.2)</h2>' +
     '<table><tr><th>Target ID</th><th>Type</th><th>URL</th><th>Network</th><th>Injected</th><th>Boot</th><th>Events</th><th>Skip Reason</th></tr>' + targetRows + '</table>' +
 
     // Network Conversation
@@ -524,7 +524,7 @@ function generateHtmlReport(report, correlation, exfiltrationEntries, networkCon
     '<h2>💉 Injection Status</h2><table><tr><th>Layer</th><th>Status</th></tr>' + injRows +
     '<tr><td colspan="2"><strong>Verdict: ' + report.injectionStatus.verdict + '</strong></td></tr></table>' +
 
-    '<p style="text-align:center;color:#555;margin-top:30px">Sentinel v4.6.1 Ghost Protocol — Zero Spoofing — ' + report.timestamp + '</p>' +
+    '<p style="text-align:center;color:#555;margin-top:30px">Sentinel v4.6.2 Ghost Protocol — Zero Spoofing — ' + report.timestamp + '</p>' +
     '</div></body></html>';
 }
 

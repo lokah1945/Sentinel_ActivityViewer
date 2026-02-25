@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Sentinel v4.6 — Ghost Protocol Test Suite
+ * Sentinel v4.6.2 — Ghost Protocol Test Suite
  * 
  * Tests injection, quiet mode, and report generation without a browser.
  * For full integration testing, use: node index.js <url> --verbose
@@ -13,7 +13,7 @@ const { TargetGraph } = require('./lib/target-graph');
 const fs = require('fs');
 
 console.log('╔═══════════════════════════════════════════╗');
-console.log('║  🧪 Sentinel v4.6 Ghost Protocol Tests     ║');
+console.log('║  🧪 Sentinel v4.6.2 Ghost Protocol Tests     ║');
 console.log('╚═══════════════════════════════════════════╝\n');
 
 let pass = 0, fail = 0;
@@ -59,7 +59,7 @@ test('Interceptor script is valid JS (42 categories)', () => {
   const script = getInterceptorScript({ timeout: 30000, stealthEnabled: true, stackSampleRate: 10 });
   assert(typeof script === 'string', 'Not a string');
   assert(script.length > 5000, 'Too short');
-  // Check for v4.6 new hooks
+  // Check for v4.6.2 new hooks
   assert(script.includes('URL.createObjectURL'), 'Missing Blob URL monitoring');
   assert(script.includes('SharedArrayBuffer'), 'Missing SharedArrayBuffer monitoring');
   assert(script.includes('postMessage'), 'Missing postMessage monitoring');
@@ -140,7 +140,7 @@ test('Report generator produces valid output', () => {
 });
 
 // ── Test 7: Categories count ──
-test('Report has 42 categories (v4.6 expansion)', () => {
+test('Report has 42 categories (v4.6.2 expansion)', () => {
   const { generateReport } = require('./reporters/report-generator');
   const result = generateReport(
     { events: [{ ts: 0, cat: 'system', api: 'BOOT_OK', risk: 'low' }], bootOk: true },
@@ -166,7 +166,7 @@ test('Zero spoofing: no UA/locale/timezone override', () => {
 console.log(`\n${'─'.repeat(45)}`);
 console.log(`  Results: ${pass} passed, ${fail} failed`);
 if (fail === 0) {
-  console.log('  🎉 All tests passed! v4.6 Ghost Protocol ready.');
+  console.log('  🎉 All tests passed! v4.6.2 Ghost Protocol ready.');
 } else {
   console.log('  ⚠️  Some tests failed. Review before deployment.');
 }
