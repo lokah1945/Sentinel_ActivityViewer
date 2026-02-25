@@ -1,25 +1,18 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "3.0.0",
-  "description": "Sentinel v3 \u2014 Browser Activity Viewer & Maling Catcher with Stealth Mode",
+  "version": "5.1.0",
+  "description": "SENTINEL v5.1.0 — Unified Forensic Engine (Invisible Edition)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "scan": "node index.js",
-    "dual": "node index.js --dual-mode"
+    "test": "node tests/test-regression.js",
+    "test:stress": "node tests/test-stress.js",
+    "test:injection": "node tests/test-injection.js",
+    "test:full": "node tests/test-regression.js && node tests/test-stress.js"
   },
   "dependencies": {
-    "playwright-extra": "^4.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "playwright": "^1.49.0",
-    "chalk": "^4.1.2",
-    "ora": "^5.4.1"
+    "playwright": "^1.50.0"
   },
-  "keywords": [
-    "fingerprint",
-    "browser-security",
-    "stealth",
-    "sentinel"
-  ],
+  "author": "Sentinel Forensic Lab",
   "license": "MIT"
 }
