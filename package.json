@@ -1,21 +1,24 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "6.4.0",
-  "description": "Sentinel v6.4.0 — Pure Observer CCTV with Auto-Cleanup. Zero Injection. Zero Spoofing. No Incognito Detection.",
+  "version": "7.0.0",
+  "description": "SENTINEL v7.0.0 \u2014 Hybrid Dual-Telemetry Forensic Engine. Hook Layer + CDP Observer + rebrowser-patches + Stealth Plugin.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx playwright install chromium",
-    "test": "node test-regression.js"
+    "postinstall": "npx rebrowser-playwright install chromium",
+    "test": "node tests/test-regression.js",
+    "test:stress": "node tests/test-stress.js",
+    "test:injection": "node tests/test-injection.js",
+    "test:full": "node tests/test-regression.js && node tests/test-stress.js && node tests/test-injection.js"
   },
   "dependencies": {
-    "playwright-core": "npm:rebrowser-playwright-core@^1.52.0",
+    "rebrowser-playwright": "^1.52.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
-  "devDependencies": {},
   "engines": {
     "node": ">=18.0.0"
   },
+  "author": "Sentinel Forensic Lab",
   "license": "MIT"
 }
