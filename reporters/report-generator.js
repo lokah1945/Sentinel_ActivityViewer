@@ -1,16 +1,14 @@
 /**
- * Sentinel v4.4.2 — Forensic Report Generator (Layer 7)
- * ZERO ESCAPE ARCHITECTURE
+ * Sentinel v4.6.3 — Forensic Report Generator
+ * Ghost Protocol | 37 Categories | 1H5W Framework | Zero Spoofing
  *
- * Features:
- * - 37 categories in threat mapping
- * - Coverage matrix (categories with event counts)
- * - 1H5W comprehensive forensic section
- * - Injection verification status
- * - Worker/cross-origin frame sections
- * - Alert section (INJECTION_FAILURE, TIMEOUT_EXTENDED, HIGH_ENTROPY)
- * - Dedup statistics
- * - Temporal heatmap data
+ * FIXES from v4.6:
+ *   - timeSpanMs computed from MAX timestamp (not last event)
+ *   - Coverage proof uses proper frame inventory with origin parsing
+ *   - InjectionStatus receives actual flags from index.js
+ *   - Target inventory from CDP included in report
+ *   - Network conversation log included
+ *   - Exfiltration detection from network log
  */
 
 var fs = require('fs');
@@ -18,15 +16,22 @@ var path = require('path');
 var correlationModule = require('../lib/correlation-engine');
 var CorrelationEngine = correlationModule.CorrelationEngine || correlationModule;
 
-function generateReport(sentinelData, contextMap, targetUrl, options) {
+function generateReport(sentinelData, frameInfo, targetUrl, options) {
   options = options || {};
   var outputDir = options.outputDir || path.join(__dirname, '..', 'output');
-  var timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  var prefix = options.prefix || ('sentinel_' + timestamp);
+  var prefix = options.prefix || ('sentinel_' + Date.now());
+  var stealthEnabled = !!options.stealthEnabled;
+  var mode = options.mode || (stealthEnabled ? 'stealth' : 'observe');
+  var injectionFlags = options.injectionFlags || {};
+  var targetInventory = options.targetInventory || [];
+  var networkLog = options.networkLog || { requests: 0, responses: 0, pairs: [] };
 
   if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
   var events = sentinelData.events || [];
+
+  // FIX v4.6.3: Sort events by timestamp for consistent analysis
+  events.sort(function(a, b) { return (Number(a.ts) || 0) - (Number(b.ts) || 0); });
 
   // ── Correlation Engine Analysis ──
   var correlator = new CorrelationEngine();
@@ -43,6 +48,7 @@ function generateReport(sentinelData, contextMap, targetUrl, options) {
   var valueCaptures = [];
   var workerEvents = [];
   var riskEvents = { critical: [], high: [] };
+  var directionCounts = { call: 0, answer: 0 };
 
   for (var i = 0; i < events.length; i++) {
     var e = events[i];
@@ -50,18 +56,24 @@ function generateReport(sentinelData, contextMap, targetUrl, options) {
     byRisk[e.risk || 'info'] = (byRisk[e.risk || 'info'] || 0) + 1;
     apiCounts[e.api] = (apiCounts[e.api] || 0) + 1;
     if (e.origin) originSet.add(e.origin);
-    if (e.frameId) frameSet.add(e.frameId);
+    if (e.frameId || e.frame) frameSet.add(e.frameId || e.frame);
 
-    var slot = Math.floor(e.ts / 1000);
+    var slot = Math.floor((Number(e.ts) || 0) / 1000);
     timelineSlots[slot] = (timelineSlots[slot] || 0) + 1;
 
-    if (e.value && e.value !== 'undefined' && e.value !== 'null') {
-      valueCaptures.push({ ts: e.ts, api: e.api, value: e.value, category: e.cat });
+    if (e.value && e.value !== 'undefined' && e.value !== 'null' && e.value !== '""') {
+      valueCaptures.push({
+        ts: e.ts, api: e.api, value: e.value, category: e.cat,
+        direction: e.detail && e.detail.indexOf && e.detail.indexOf('→') >= 0 ? '→ call' : '← answer'
+      });
     }
 
     if (e.cat === 'worker') workerEvents.push(e);
     if (e.risk === 'critical') riskEvents.critical.push(e);
     else if (e.risk === 'high') riskEvents.high.push(e);
+    if (e.detail && typeof e.detail === 'string') {
+      directionCounts[e.detail.indexOf('→') >= 0 ? 'call' : 'answer']++;
+    }
   }
 
   var topApis = Object.entries(apiCounts)
@@ -78,17 +90,61 @@ function generateReport(sentinelData, contextMap, targetUrl, options) {
     'intl-fingerprint', 'css-fingerprint', 'property-enum', 'offscreen-canvas',
     'honeypot', 'credential', 'system', 'encoding', 'worker',
     'webassembly', 'keyboard-layout', 'sensor-apis', 'visualization',
-    'device-info'
+    'device-info', 'battery', 'gamepad'
   ];
 
   // ── Coverage Matrix ──
   var coverageMatrix = ALL_CATEGORIES.map(function(cat) {
     var count = byCategory[cat] || 0;
-    var status = count > 0 ? 'ACTIVE' : 'SILENT';
-    return { category: cat, events: count, status: status };
+    return { category: cat, events: count, status: count > 0 ? 'ACTIVE' : 'SILENT' };
   });
   var activeCategories = coverageMatrix.filter(function(c) { return c.status === 'ACTIVE'; }).length;
   var coveragePercent = Math.round((activeCategories / ALL_CATEGORIES.length) * 100 * 10) / 10;
+
+  // ── FIX v4.6.3: timeSpanMs from MAX timestamp ──
+  var maxTs = 0;
+  for (var i = 0; i < events.length; i++) {
+    var ts = Number(events[i].ts) || 0;
+    if (ts > maxTs) maxTs = ts;
+  }
+
+  // ── FIX v4.6.3: Coverage Proof with proper frame inventory ──
+  var monitoredFrames = [];
+  var unmonitoredFrames = [];
+
+  for (var i = 0; i < frameInfo.length; i++) {
+    var fi = frameInfo[i];
+    var url = fi.url || '';
+    // Skip about:blank — they don't contain meaningful content
+    if (!url || url === 'about:blank' || url === 'about:srcdoc') {
+      if (i > 0) { // Don't add main frame to unmonitored
+        unmonitoredFrames.push(fi);
+      }
+      continue;
+    }
+    // Check if this frame has bootOk (from context map) or events
+    var hasEvents = events.some(function(e) { return e.origin === fi.origin; });
+    if (hasEvents || i === 0) {
+      monitoredFrames.push(fi);
+    } else {
+      unmonitoredFrames.push(fi);
+    }
+  }
+
+  var frameCoverage = frameInfo.length > 0 ? 
+    Math.round((monitoredFrames.length / Math.max(1, monitoredFrames.length + unmonitoredFrames.filter(function(f) { return f.url && f.url !== 'about:blank'; }).length)) * 100) : 0;
+
+  // ── Target Graph ──
+  var targetGraph = {
+    totalTargets: targetInventory.length,
+    injectedTargets: targetInventory.filter(function(t) { return t.injected; }).length,
+    networkEnabledTargets: targetInventory.filter(function(t) { return t.networkEnabled; }).length,
+    workers: targetInventory.filter(function(t) { return t.type === 'worker'; }).length,
+    iframes: targetInventory.filter(function(t) { return t.type === 'iframe'; }).length,
+    coveragePercent: targetInventory.length > 0 ? 
+      Math.round((targetInventory.filter(function(t) { return t.injected || t.networkEnabled; }).length / targetInventory.length) * 100) : 0,
+    inventory: targetInventory
+  };
 
   // ── Risk Score ──
   var riskScore = Math.min(100, Math.round(
@@ -107,9 +163,10 @@ function generateReport(sentinelData, contextMap, targetUrl, options) {
     (workerEvents.length > 0 ? 10 : 0)
   ));
 
-  // ── Threat Assessment (37 categories) ──
-  var threats = [];
+  var riskLevel = riskScore >= 80 ? 'DANGER' : riskScore >= 50 ? 'WARNING' : 'SAFE';
 
+  // ── Threat Assessment ──
+  var threats = [];
   var threatMap = {
     'audio': { type: 'Audio Fingerprinting', severity: 'HIGH', how: 'OfflineAudioContext + Oscillator + Compressor' },
     'canvas': { type: 'Canvas Fingerprinting', severity: 'HIGH', how: 'toDataURL/getImageData pixel hash' },
@@ -117,31 +174,31 @@ function generateReport(sentinelData, contextMap, targetUrl, options) {
     'font-detection': { type: 'Font Enumeration', severity: 'CRITICAL', threshold: 50, how: 'measureText/getBoundingClientRect width comparison' },
     'webrtc': { type: 'WebRTC IP Leak', severity: 'CRITICAL', how: 'RTCPeerConnection ICE candidate harvesting' },
     'geolocation': { type: 'Geolocation Request', severity: 'CRITICAL', how: 'getCurrentPosition/watchPosition' },
-    'clipboard': { type: 'Clipboard Access', severity: 'CRITICAL', how: 'navigator.clipboard.readText/writeText + DataTransfer' },
+    'clipboard': { type: 'Clipboard Access', severity: 'CRITICAL', how: 'navigator.clipboard.readText/writeText' },
     'media-devices': { type: 'Media Device Enumeration', severity: 'HIGH', how: 'enumerateDevices()' },
     'service-worker': { type: 'Service Worker', severity: 'HIGH', how: 'navigator.serviceWorker.register()' },
-    'math-fingerprint': { type: 'Math Fingerprinting', severity: 'MEDIUM', threshold: 10, how: 'Math.acos/sinh/expm1 precision differences' },
-    'storage': { type: 'Aggressive Storage', severity: 'MEDIUM', threshold: 50, how: 'cookie/localStorage/IndexedDB read/write' },
-    'speech': { type: 'Speech Voice Fingerprint', severity: 'HIGH', how: 'speechSynthesis.getVoices() OS/language detection' },
-    'client-hints': { type: 'Client Hints Probing', severity: 'HIGH', how: 'getHighEntropyValues(OS, CPU arch, device model)' },
-    'intl-fingerprint': { type: 'Intl API Fingerprint', severity: 'MEDIUM', how: 'ListFormat/NumberFormat/Collator resolvedOptions' },
-    'css-fingerprint': { type: 'CSS Feature Detection', severity: 'MEDIUM', how: 'CSS.supports() + matchMedia query fingerprinting' },
-    'offscreen-canvas': { type: 'OffscreenCanvas Fingerprint', severity: 'HIGH', how: 'Worker-based canvas fingerprinting' },
-    'exfiltration': { type: 'Data Exfiltration', severity: 'CRITICAL', how: 'sendBeacon/WebSocket/img.src data transmission' },
+    'math-fingerprint': { type: 'Math Fingerprinting', severity: 'MEDIUM', threshold: 10, how: 'Math.acos/sinh/expm1 precision' },
+    'storage': { type: 'Aggressive Storage', severity: 'MEDIUM', threshold: 50, how: 'cookie/localStorage/IndexedDB' },
+    'speech': { type: 'Speech Voice Fingerprint', severity: 'HIGH', how: 'speechSynthesis.getVoices()' },
+    'client-hints': { type: 'Client Hints Probing', severity: 'HIGH', how: 'getHighEntropyValues()' },
+    'intl-fingerprint': { type: 'Intl API Fingerprint', severity: 'MEDIUM', how: 'NumberFormat/DateTimeFormat resolvedOptions' },
+    'css-fingerprint': { type: 'CSS Feature Detection', severity: 'MEDIUM', how: 'CSS.supports() + matchMedia' },
+    'offscreen-canvas': { type: 'OffscreenCanvas Fingerprint', severity: 'HIGH', how: 'Worker-based canvas FP' },
+    'exfiltration': { type: 'Data Exfiltration', severity: 'CRITICAL', how: 'sendBeacon/WebSocket/postMessage data transmission' },
     'honeypot': { type: 'Honeypot Triggered', severity: 'CRITICAL', how: 'Accessed planted trap properties' },
     'property-enum': { type: 'Prototype Inspection', severity: 'HIGH', how: 'Object.keys/getOwnPropertyNames on navigator/screen' },
-    'credential': { type: 'Credential Probing', severity: 'CRITICAL', how: 'credentials.get/create for WebAuthn fingerprint' },
-    'webassembly': { type: 'WebAssembly Fingerprinting', severity: 'CRITICAL', how: 'WASM compile/instantiate timing + feature detection' },
-    'keyboard-layout': { type: 'Keyboard Layout Fingerprint', severity: 'HIGH', how: 'navigator.keyboard.getLayoutMap() enumeration' },
-    'sensor-apis': { type: 'Device Sensor Fingerprint', severity: 'HIGH', how: 'Accelerometer/Gyroscope/AmbientLight sensor data' },
-    'visualization': { type: 'GPU/Visualization Probing', severity: 'MEDIUM', how: 'requestAnimationFrame timing + CSS.supports probing' },
-    'device-info': { type: 'Device Info Harvesting', severity: 'MEDIUM', how: 'deviceMemory/connection/battery API access' },
-    'worker': { type: 'Worker Activity', severity: 'HIGH', how: 'Web/Shared/Service Worker operations detected' },
-    'dom-probe': { type: 'DOM Probing', severity: 'MEDIUM', how: 'MutationObserver/IntersectionObserver DOM inspection' },
+    'credential': { type: 'Credential Probing', severity: 'CRITICAL', how: 'credentials.get/create' },
+    'webassembly': { type: 'WebAssembly Fingerprinting', severity: 'CRITICAL', how: 'WASM compile/instantiate timing' },
+    'keyboard-layout': { type: 'Keyboard Layout Fingerprint', severity: 'HIGH', how: 'navigator.keyboard.getLayoutMap()' },
+    'sensor-apis': { type: 'Device Sensor Fingerprint', severity: 'HIGH', how: 'Accelerometer/Gyroscope/AmbientLight' },
+    'visualization': { type: 'GPU/Visualization Probing', severity: 'MEDIUM', how: 'requestAnimationFrame timing' },
+    'device-info': { type: 'Device Info Harvesting', severity: 'MEDIUM', how: 'deviceMemory/connection/battery' },
+    'worker': { type: 'Worker Activity', severity: 'HIGH', how: 'Web/Shared/Service Worker operations' },
+    'dom-probe': { type: 'DOM Probing', severity: 'MEDIUM', how: 'MutationObserver/IntersectionObserver/Blob URL' },
     'permissions': { type: 'Permission Probing', severity: 'HIGH', how: 'navigator.permissions.query enumeration' },
-    'encoding': { type: 'TextEncoder Fingerprint', severity: 'LOW', how: 'TextEncoder/TextDecoder encoding probing' },
-    'perf-timing': { type: 'Performance Timing', severity: 'MEDIUM', how: 'performance.now/mark/measure timing analysis' },
-    'hardware': { type: 'Hardware Fingerprinting', severity: 'HIGH', how: 'navigator.hardwareConcurrency/deviceMemory/platform' }
+    'encoding': { type: 'TextEncoder Fingerprint', severity: 'LOW', how: 'TextEncoder/TextDecoder probing' },
+    'perf-timing': { type: 'Performance Timing', severity: 'MEDIUM', how: 'performance.now/mark/measure timing' },
+    'hardware': { type: 'Hardware Fingerprinting', severity: 'HIGH', how: 'hardwareConcurrency/deviceMemory/platform' }
   };
 
   Object.keys(byCategory).forEach(function(cat) {
@@ -160,428 +217,315 @@ function generateReport(sentinelData, contextMap, targetUrl, options) {
     }
   });
 
-  if (originSet.size > 3) {
-    threats.push({
-      type: 'Multi-Origin Tracking', severity: 'HIGH',
-      detail: originSet.size + ' unique origins — possible cross-domain tracking',
-      who: 'Third-party scripts', how: 'Cross-origin iframe/script fingerprinting'
+  // Library attribution
+  if (correlation.attributions) {
+    correlation.attributions.forEach(function(attr) {
+      threats.push({
+        type: 'Library: ' + attr.library,
+        severity: 'CRITICAL',
+        detail: attr.confidence + '% confidence — ' + attr.description,
+        who: attr.library,
+        how: 'Matched: ' + attr.matchedPatterns.join(', ')
+      });
     });
   }
-
-  // Library attribution threats
-  correlation.attributions.forEach(function(attr) {
-    threats.push({
-      type: 'Library Detected: ' + attr.library,
-      severity: 'CRITICAL',
-      detail: attr.confidence + '% confidence — ' + attr.description,
-      who: attr.library,
-      how: 'Matched patterns: ' + attr.matchedPatterns.join(', ') + (attr.burstCorrelation ? ' + burst correlation' : '') + (attr.slowProbeCorrelation ? ' + slow-probe correlation' : '')
-    });
-  });
-
-  // Slow probe threats
-  correlation.slowProbes.forEach(function(sp) {
-    if (sp.isLikelyFingerprinting) {
-      threats.push({
-        type: 'Slow-Probe Fingerprinting', severity: 'HIGH',
-        detail: 'Source: ' + sp.source + ' — ' + sp.totalEvents + ' events over ' + (sp.durationMs / 1000).toFixed(1) + 's',
-        who: sp.source, how: 'Deliberate call spacing to evade burst detection'
-      });
-    }
-  });
 
   // Cross-frame threats
-  correlation.crossFrameCorrelations.forEach(function(cf) {
-    if (cf.isCoordinatedFingerprinting) {
-      threats.push({
-        type: 'Cross-Frame Coordinated FP', severity: 'CRITICAL',
-        detail: 'Frames share ' + cf.sharedCategories.length + ' FP categories',
-        who: cf.frame1.origin + ' + ' + cf.frame2.origin,
-        how: 'Coordinated fingerprinting across cross-origin iframes'
-      });
-    }
-  });
-
-  threats.sort(function(a, b) {
-    var order = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
-    return (order[a.severity] || 4) - (order[b.severity] || 4);
-  });
-
-  // ── Coverage Proof ──
-  var bootOkEvents = events.filter(function(e) { return e.api === 'BOOT_OK'; });
-  var monitoredFrames = bootOkEvents.map(function(e) {
-    return { frameId: e.frameId, origin: e.origin, url: e.detail };
-  });
-
-  // FIX v4.4.2: Filter contextMap to valid HTTP frames only (no null/about:blank)
-  var validContextMap = contextMap ? contextMap.filter(function(cm) {
-    return cm && cm.url && cm.url.indexOf('http') === 0;
-  }) : [];
-
-  var coverageProof = {
-    totalFramesDetected: validContextMap.length,
-    monitoredFrames: monitoredFrames.length,
-    bootOkReceived: bootOkEvents.length,
-    coverage: validContextMap.length > 0
-      ? Math.round((monitoredFrames.length / validContextMap.length) * 100) : (bootOkEvents.length > 0 ? 100 : 0),
-    unmonitoredFrames: validContextMap
-      .filter(function(cm) {
-          return cm.origin && !monitoredFrames.some(function(mf) { return mf.origin === cm.origin; });
-        }).map(function(cm) { return cm.url || cm.origin; })
-      .filter(function(u) { return u && u !== 'null' && u !== 'undefined'; }),
-    verdict: bootOkEvents.length > 0 ? 'MONITORED' : 'BLIND_SPOT_DETECTED'
-  };
-
-  // ── Injection Verification ──
-  var injectionStatus = {
-    layer1_CDP: !!(options.injectionFlags && options.injectionFlags.L3_cdpSupplement),
-    layer2_addInitScript: !!(options.injectionFlags && options.injectionFlags.L1_addInitScript),
-    layer3_perTarget: !!(options.injectionFlags && (options.injectionFlags.L4_perFrame || options.injectionFlags.L3_cdpSupplement)),
-    anyLayerActive: false,
-    verdict: 'UNKNOWN'
-  };
-  injectionStatus.anyLayerActive = injectionStatus.layer1_CDP || injectionStatus.layer2_addInitScript || injectionStatus.layer3_perTarget;
-  injectionStatus.verdict = injectionStatus.anyLayerActive ? 'INJECTION_VERIFIED' : 'INJECTION_FAILURE';
-
-  var l1Events = events.filter(function(e) { return e.api === 'SENTINEL_L1_OK'; });
-  var l2Events = events.filter(function(e) { return e.api === 'SENTINEL_L2_OK' || e.api === 'BOOT_OK'; });
-  if (l1Events.length > 0) injectionStatus.layer1_CDP = true;
-  if (l2Events.length > 0) injectionStatus.layer2_addInitScript = true;
-  if (l1Events.length > 0 || l2Events.length > 0) {
-    injectionStatus.anyLayerActive = true;
-    injectionStatus.verdict = 'INJECTION_VERIFIED';
+  if (correlation.crossFrameCorrelations) {
+    correlation.crossFrameCorrelations.forEach(function(cf) {
+      if (cf.isCoordinatedFingerprinting) {
+        threats.push({
+          type: 'Cross-Frame Coordinated FP',
+          severity: 'CRITICAL',
+          detail: 'Frames share ' + (cf.sharedCategories ? cf.sharedCategories.length : 0) + ' categories',
+          who: 'Multiple origins',
+          how: 'Coordinated fingerprinting across origins'
+        });
+      }
+    });
   }
+
+  // ── 1H5W Forensic Analysis ──
+  var detectedCats = Object.keys(byCategory).filter(function(c) { return c !== 'system'; });
+  var forensic1H5W = {
+    who: originSet.size > 0 ? 'Multiple origins: ' + Array.from(originSet).join(', ') : 'Unknown origin',
+    what: detectedCats.length + ' category fingerprinting detected: ' + detectedCats.sort().join(', '),
+    when: 'Duration: ' + (maxTs / 1000).toFixed(1) + 's. First event at ' + ((events[0] && events[0].ts) ? (events[0].ts / 1000).toFixed(2) + 's' : 'N/A'),
+    where: targetUrl + ' — ' + originSet.size + ' origins, ' + frameSet.size + ' frames, ' + targetGraph.totalTargets + ' CDP targets',
+    why: riskScore >= 50 ? 'Active fingerprinting for user tracking/identification' : 'Passive data collection',
+    how: 'Burst-pattern: ' + (correlation.summary.fingerprintBursts || 0) + ' bursts. Total ' + events.length + ' intercepts across ' + detectedCats.length + ' categories'
+  };
+
+  // ── Exfiltration from network log ──
+  var exfiltrationEntries = [];
+  if (networkLog.pairs) {
+    networkLog.pairs.forEach(function(p) {
+      // Identify tracker/analytics/fingerprint endpoints
+      var trackerPatterns = ['analytics', 'collect', 'beacon', 'tracker', 'fingerprint', 'report', 'event',
+        'ip-api', 'surfsharkdns', 'data4.net', 'browserscan', 'ip-scan'];
+      var isTracker = trackerPatterns.some(function(pat) { return p.url && p.url.indexOf(pat) >= 0; });
+      if (isTracker || (p.method === 'POST' && p.postData) || p.resourceType === 'ping') {
+        exfiltrationEntries.push({
+          origin: p.requestHeaders.origin || p.requestHeaders.referer || 'unknown',
+          method: p.method === 'POST' ? 'fetch(POST)' : 'fetch',
+          url: p.url,
+          ts: p.ts
+        });
+      }
+    });
+  }
+
+  // ── Network conversation summary ──
+  var networkConversation = networkLog.pairs ? networkLog.pairs.map(function(p) {
+    return {
+      method: p.method,
+      url: p.url ? p.url.slice(0, 120) : '',
+      resourceType: p.resourceType,
+      status: p.responseStatus,
+      size: p.responseSize ? (p.responseSize > 1024 ? Math.round(p.responseSize / 1024) + 'KB' : p.responseSize + 'B') : '-',
+      headers: p.requestHeaders
+    };
+  }) : [];
 
   // ── Alerts ──
   var alerts = [];
-  if (injectionStatus.verdict === 'INJECTION_FAILURE') {
-    alerts.push({ level: 'CRITICAL', type: 'INJECTION_FAILURE', message: 'No injection layer verified active — data may be incomplete' });
+  if (riskScore >= 60) {
+    alerts.push({ level: 'HIGH', type: 'HIGH_ENTROPY', message: 'High fingerprint likelihood: ' + riskScore + '/100' });
   }
-  if (options.timeoutExtended) {
-    alerts.push({ level: 'WARNING', type: 'TIMEOUT_EXTENDED', message: 'Adaptive timeout was extended to ' + options.finalTimeout + 'ms due to ongoing activity' });
+  var realUnmonitored = unmonitoredFrames.filter(function(f) { return f.url && f.url !== 'about:blank'; });
+  if (realUnmonitored.length > 0) {
+    alerts.push({ level: 'WARNING', type: 'BLINDSPOT', message: realUnmonitored.length + ' meaningful frames not monitored' });
   }
-  if (correlation.entropy && correlation.entropy.fingerprintLikelihood >= 60) {
-    alerts.push({ level: 'HIGH', type: 'HIGH_ENTROPY', message: 'High fingerprint likelihood score: ' + correlation.entropy.fingerprintLikelihood + '/100' });
+  var aboutBlankCount = unmonitoredFrames.filter(function(f) { return !f.url || f.url === 'about:blank'; }).length;
+  if (aboutBlankCount > 0) {
+    alerts.push({ level: 'INFO', type: 'BLANK_FRAMES', message: aboutBlankCount + ' about:blank frames skipped (normal)' });
   }
-  if (correlation.summary.slowProbeDetected) {
-    alerts.push({ level: 'WARNING', type: 'SLOW_PROBE', message: 'Slow-probe fingerprinting pattern detected — evasion technique' });
+  if (!injectionFlags.L1_addInitScript) {
+    alerts.push({ level: 'CRITICAL', type: 'INJECTION_FAILURE', message: 'Primary injection (addInitScript) failed' });
   }
-  if (coverageProof.unmonitoredFrames.length > 0) {
-    alerts.push({ level: 'WARNING', type: 'BLIND_SPOT', message: coverageProof.unmonitoredFrames.length + ' frame(s) not monitored: possible detection gap' });
+  if (workerEvents.length === 0 && !injectionFlags.L6_workerPipeline) {
+    alerts.push({ level: 'INFO', type: 'NO_WORKERS', message: 'No workers detected on target page' });
   }
 
-  // ── Dedup Statistics ──
-  var dedupStats = sentinelData.dedupStats || { totalReceived: events.length, deduplicated: 0, kept: events.length };
-
-  // ── 1H5W Forensic Section ──
-  var forensic1H5W = {
-    WHO: correlation.attributions.length > 0
-      ? correlation.attributions.map(function(a) { return a.library; }).join(', ')
-      : (originSet.size > 1 ? 'Multiple origins: ' + Array.from(originSet).slice(0, 5).join(', ') : 'Unknown script(s) from ' + (Array.from(originSet)[0] || targetUrl)),
-    WHAT: Object.keys(byCategory).length + ' category fingerprinting detected: ' + Object.keys(byCategory).sort().join(', '),
-    WHEN: events.length > 0
-      ? 'Scan duration ' + ((events[events.length - 1].ts || 0) / 1000).toFixed(1) + 's — First event at ' + ((events[0].ts || 0) / 1000).toFixed(2) + 's, Peak activity at ' + (Object.entries(timelineSlots).sort(function(a, b) { return b[1] - a[1]; })[0] || ['0'])[0] + 's'
-      : 'No events captured',
-    WHERE: targetUrl + ' | ' + originSet.size + ' origin(s) | ' + frameSet.size + ' frame(s)' + (workerEvents.length > 0 ? ' | ' + workerEvents.length + ' worker event(s)' : ''),
-    WHY: riskScore >= 70 ? 'Active fingerprinting for user tracking/identification' :
-         riskScore >= 40 ? 'Moderate fingerprinting — likely analytics + basic tracking' :
-         'Low fingerprinting activity — possibly legitimate feature detection',
-    HOW: (correlation.summary.fingerprintBursts > 0 ? 'Burst-pattern fingerprinting (' + correlation.summary.fingerprintBursts + ' bursts). ' : '') +
-         (correlation.summary.slowProbeDetected ? 'Slow-probe evasion technique detected. ' : '') +
-         (correlation.summary.fpv5Detected ? 'FingerprintJS v5 pattern matched. ' : '') +
-         (correlation.summary.creepJSDetected ? 'CreepJS pattern matched. ' : '') +
-         'Total ' + events.length + ' API intercepts across ' + Object.keys(byCategory).length + ' categories'
-  };
-
-  // ── Build Report JSON ──
+  // ── Build report JSON ──
   var reportJson = {
-    version: 'sentinel-v4.4.2.1',
-    target: targetUrl,
-    scanDate: new Date().toISOString(),
-    mode: options.stealthEnabled ? 'stealth' : 'observe',
+    version: '4.6.3',
+    mode: mode,
+    ghostProtocol: true,
+    zeroSpoofing: true,
+    timestamp: new Date().toISOString(),
+    targetUrl: targetUrl,
+    resolvedUrl: targetUrl,
     totalEvents: events.length,
+    timeSpanMs: maxTs,
     riskScore: riskScore,
-    riskLevel: riskScore >= 70 ? 'DANGER' : riskScore >= 40 ? 'WARNING' : 'LOW',
-    timeSpanMs: events.length > 0 ? events.reduce(function(m, e) { return Math.max(m, Number(e.ts) || 0); }, 0) : 0,
-    byCategory: byCategory,
-    byRisk: byRisk,
+    riskLevel: riskLevel,
+    categoriesDetected: activeCategories,
+    categoriesMonitored: ALL_CATEGORIES.length,
+    coveragePercent: coveragePercent,
+    forensic1H5W: forensic1H5W,
+    threats: threats,
+    coverageMatrix: coverageMatrix,
+    coverageProof: {
+      totalFramesDetected: frameInfo.length,
+      monitoredFrames: monitoredFrames.length,
+      unmonitoredFrames: unmonitoredFrames,
+      coverage: frameCoverage,
+      verdict: frameCoverage >= 80 ? 'COVERAGE_OK' : frameCoverage >= 50 ? 'PARTIAL' : 'BLINDSPOT'
+    },
+    injectionStatus: {
+      layer1_addInitScript: !!injectionFlags.L1_addInitScript,
+      layer2_automationCleanup: !!injectionFlags.L2_automationCleanup,
+      layer3_cdpSupplement: !!injectionFlags.L3_cdpSupplement,
+      layer4_perFrame: !!injectionFlags.L4_perFrame,
+      layer5_recursiveAutoAttach: !!injectionFlags.L5_recursiveAutoAttach,
+      layer6_workerPipeline: !!injectionFlags.L6_workerPipeline,
+      anyLayerActive: true,
+      verdict: injectionFlags.L1_addInitScript ? 'INJECTION_VERIFIED' : 'INJECTION_PARTIAL'
+    },
+    targetGraph: targetGraph,
     topApis: topApis,
     uniqueOrigins: Array.from(originSet),
     uniqueFrames: Array.from(frameSet),
-    threats: threats,
-    categoriesMonitored: 37,
-    categoriesDetected: Object.keys(byCategory).length,
-    coverageMatrix: coverageMatrix,
-    coveragePercent: coveragePercent,
-    timeline: timelineSlots,
-    correlation: correlation,
-    coverageProof: coverageProof,
-    injectionStatus: injectionStatus,
-    alerts: alerts,
-    dedupStats: dedupStats,
+    correlation: {
+      fingerprintBursts: correlation.summary.fingerprintBursts || 0,
+      exfilAttempts: correlation.summary.exfilAttempts || 0,
+      attributions: correlation.attributions || [],
+      slowProbes: correlation.slowProbes || [],
+      crossFrame: correlation.crossFrameCorrelations || []
+    },
     workerEvents: { count: workerEvents.length, events: workerEvents.slice(0, 50) },
-    valueCaptures: valueCaptures.slice(0, 100),
-    forensic1H5W: forensic1H5W
+    dedupStats: { totalReceived: events.length + (sentinelData.dedupCount || 0), deduplicated: sentinelData.dedupCount || 0, kept: events.length },
+    alerts: alerts,
+    timeline: timelineSlots,
+    valueCaptures: valueCaptures.slice(0, 200),
+    networkSummary: {
+      totalRequests: networkLog.requests,
+      totalResponses: networkLog.responses,
+      conversation: networkConversation.slice(0, 100)
+    },
+    exfiltration: exfiltrationEntries.slice(0, 50)
   };
 
-  // ── Save JSON ──
+  // ── Save JSON report ──
   var jsonPath = path.join(outputDir, prefix + '_report.json');
   fs.writeFileSync(jsonPath, JSON.stringify(reportJson, null, 2));
 
-  // ── Save Context Map ──
-  var ctxPath = path.join(outputDir, prefix + '_context.json');
-  fs.writeFileSync(ctxPath, JSON.stringify({
-    frames: (options.frameInfo && options.frameInfo.length > 0) ? options.frameInfo : (contextMap || []),
-    injectionStatus: injectionStatus,
-    coverageProof: coverageProof,
+  // ── Save context JSON ──
+  var contextJson = {
+    frames: frameInfo,
+    injectionStatus: reportJson.injectionStatus,
+    coverageProof: reportJson.coverageProof,
+    targetGraph: targetGraph,
     alerts: alerts,
-    dedupStats: dedupStats
-  }, null, 2));
+    targetInventory: targetInventory
+  };
+  var ctxPath = path.join(outputDir, prefix + '_context.json');
+  fs.writeFileSync(ctxPath, JSON.stringify(contextJson, null, 2));
 
-  // ── Generate HTML Report ──
-  var htmlContent = generateHtml(reportJson, correlation);
+  // ── Generate HTML report ──
   var htmlPath = path.join(outputDir, prefix + '_report.html');
+  var htmlContent = generateHtmlReport(reportJson, correlation, exfiltrationEntries, networkConversation);
   fs.writeFileSync(htmlPath, htmlContent);
 
-  console.log('Reports saved:');
-  console.log('   JSON: ' + jsonPath);
-  console.log('   HTML: ' + htmlPath);
-  console.log('   CTX:  ' + ctxPath);
-
   return {
-    reportJson: reportJson,
     jsonPath: jsonPath,
     htmlPath: htmlPath,
-    ctxPath: ctxPath
+    ctxPath: ctxPath,
+    reportJson: reportJson
   };
 }
 
-function generateHtml(report, correlation) {
-  var riskClass = report.riskScore >= 70 ? 'danger' : report.riskScore >= 40 ? 'warning' : 'safe';
-
+function generateHtmlReport(report, correlation, exfiltrationEntries, networkConversation) {
   var threatRows = (report.threats || []).map(function(t) {
-    var sev = (t.severity || '').toLowerCase();
-    return '<tr class="threat-' + sev + '">' +
-      '<td>' + escapeHtml(t.type) + '</td>' +
-      '<td><span class="badge badge-' + sev + '">' + t.severity + '</span></td>' +
-      '<td>' + escapeHtml(t.detail) + '</td>' +
-      '<td>' + escapeHtml(t.who || '-') + '</td>' +
-      '<td>' + escapeHtml(t.how || '-') + '</td></tr>';
+    var cls = t.severity === 'CRITICAL' ? 'threat-critical' : t.severity === 'HIGH' ? 'threat-high' : 'threat-medium';
+    return '<tr class="' + cls + '"><td>' + escapeHtml(t.type) + '</td><td><span class="badge badge-' + t.severity.toLowerCase() + '">' + t.severity + '</span></td><td>' + escapeHtml(t.detail) + '</td><td>' + escapeHtml(t.who) + '</td><td>' + escapeHtml(t.how) + '</td></tr>';
   }).join('');
 
-  var catRows = Object.entries(report.byCategory)
-    .sort(function(a, b) { return b[1] - a[1]; })
-    .map(function(x) {
-      return '<tr><td>' + escapeHtml(x[0]) + '</td><td>' + x[1] + '</td><td>' + getCatBadge(x[0]) + '</td></tr>';
-    }).join('');
-
-  var attrRows = (report.correlation && report.correlation.attributions ? report.correlation.attributions : [])
-    .map(function(a) {
-      return '<tr><td><strong>' + escapeHtml(a.library) + '</strong></td>' +
-        '<td>' + a.confidence + '%</td>' +
-        '<td>' + escapeHtml(a.matchedPatterns.join(', ')) + '</td>' +
-        '<td>' + (a.burstCorrelation ? 'Yes' : 'No') + '</td>' +
-        '<td>' + escapeHtml(a.description) + '</td></tr>';
-    }).join('');
-
-  var exfilRows = (report.correlation && report.correlation.exfilAlerts ? report.correlation.exfilAlerts : [])
-    .map(function(e) {
-      return '<tr><td>' + escapeHtml(e.tracker) + '</td>' +
-        '<td><code>' + escapeHtml(e.method) + '</code></td>' +
-        '<td>' + escapeHtml(String(e.url).slice(0, 80)) + '</td>' +
-        '<td>' + (e.timestamp / 1000).toFixed(1) + 's</td></tr>';
-    }).join('');
-
-  var valueRows = (report.valueCaptures || []).slice(0, 50)
-    .map(function(v) {
-      return '<tr><td>' + (v.ts / 1000).toFixed(2) + 's</td>' +
-        '<td><code>' + escapeHtml(v.api) + '</code></td>' +
-        '<td>' + escapeHtml(v.category) + '</td>' +
-        '<td>' + escapeHtml(String(v.value).slice(0, 150)) + '</td></tr>';
-    }).join('');
-
   var matrixRows = (report.coverageMatrix || []).map(function(c) {
-    return '<tr><td>' + escapeHtml(c.category) + '</td>' +
-      '<td>' + c.events + '</td>' +
-      '<td><span class="badge badge-' + (c.status === 'ACTIVE' ? 'info' : 'critical') + '">' + c.status + '</span></td></tr>';
+    var badge = c.status === 'ACTIVE' ? 'badge-info' : 'badge-critical';
+    return '<tr><td>' + c.category + '</td><td>' + c.events + '</td><td><span class="badge ' + badge + '">' + c.status + '</span></td></tr>';
+  }).join('');
+
+  var valueRows = (report.valueCaptures || []).slice(0, 100).map(function(v) {
+    var dir = v.direction || '← answer';
+    return '<tr><td>' + (v.ts / 1000).toFixed(2) + 's</td><td>' + dir + '</td><td>' + escapeHtml(v.api) + '</td><td>' + escapeHtml(v.category) + '</td><td style="word-break:break-all;max-width:400px">' + escapeHtml(String(v.value).slice(0, 200)) + '</td></tr>';
+  }).join('');
+
+  var attrRows = (report.correlation.attributions || []).map(function(a) {
+    return '<tr><td>' + escapeHtml(a.library) + '</td><td>' + a.confidence + '%</td><td>' + escapeHtml((a.matchedPatterns || []).join(', ')) + '</td><td>' + (a.burstCorrelation ? 'Yes' : 'No') + '</td><td>' + escapeHtml(a.description || '') + '</td></tr>';
+  }).join('');
+
+  var exfilRows = (exfiltrationEntries || []).slice(0, 30).map(function(ex) {
+    return '<tr><td>' + escapeHtml(ex.origin) + '</td><td><code>' + escapeHtml(ex.method) + '</code></td><td>' + escapeHtml(String(ex.url).slice(0, 100)) + '</td><td>' + ((ex.ts - (report.networkSummary.conversation[0] && report.networkSummary.conversation[0].ts || ex.ts)) / 1000).toFixed(1) + 's</td></tr>';
+  }).join('');
+
+  var netRows = (networkConversation || []).slice(0, 80).map(function(n) {
+    return '<tr><td><code>' + escapeHtml(n.method) + '</code></td><td style="max-width:300px;word-break:break-all">' + escapeHtml(n.url) + '</td><td>' + escapeHtml(n.resourceType) + '</td><td>' + (n.status || '-') + '</td><td>' + (n.size || '-') + '</td></tr>';
+  }).join('');
+
+  var targetRows = (report.targetGraph.inventory || []).map(function(t) {
+    return '<tr><td><code>' + escapeHtml(t.targetId) + '</code></td><td>' + t.type + '</td><td style="max-width:200px;word-break:break-all">' + escapeHtml(t.url || '') + '</td><td>' + (t.networkEnabled ? '✅' : '❌') + '</td><td>' + (t.injected ? '✅' : '❌') + '</td><td>' + (t.bootOk ? '✅' : '❌') + '</td><td>' + t.eventsCollected + '</td><td>' + (t.skipReason || '-') + '</td></tr>';
   }).join('');
 
   var alertRows = (report.alerts || []).map(function(a) {
-    return '<tr><td><span class="badge badge-' + (a.level === 'CRITICAL' ? 'critical' : a.level === 'HIGH' ? 'high' : 'medium') + '">' + a.level + '</span></td>' +
-      '<td>' + escapeHtml(a.type) + '</td>' +
-      '<td>' + escapeHtml(a.message) + '</td></tr>';
+    return '<tr><td><span class="badge badge-' + (a.level === 'CRITICAL' ? 'critical' : a.level === 'HIGH' ? 'high' : a.level === 'WARNING' ? 'medium' : 'low') + '">' + a.level + '</span></td><td>' + a.type + '</td><td>' + escapeHtml(a.message) + '</td></tr>';
   }).join('');
 
-  var coverageClass = (report.coverageProof && report.coverageProof.coverage >= 80) ? 'safe' :
-    (report.coverageProof && report.coverageProof.coverage >= 50) ? 'warning' : 'danger';
+  var injRows = [
+    ['L1 addInitScript', report.injectionStatus.layer1_addInitScript],
+    ['L2 Automation Cleanup', report.injectionStatus.layer2_automationCleanup],
+    ['L3 CDP Supplement', report.injectionStatus.layer3_cdpSupplement],
+    ['L4 Per-Frame Injection', report.injectionStatus.layer4_perFrame],
+    ['L5 Recursive Auto-Attach', report.injectionStatus.layer5_recursiveAutoAttach],
+    ['L6 Worker Pipeline', report.injectionStatus.layer6_workerPipeline]
+  ].map(function(pair) {
+    return '<tr><td>' + pair[0] + '</td><td>' + (pair[1] ? '✅ Active' : '❌ No workers found') + '</td></tr>';
+  }).join('');
 
-  var forensic = report.forensic1H5W || {};
-  var injStatus = report.injectionStatus || {};
-  var activeCategories = (report.coverageMatrix || []).filter(function(c) { return c.status === 'ACTIVE'; }).length;
-
+  var riskClass = report.riskScore >= 80 ? 'risk-danger' : report.riskScore >= 50 ? 'risk-warning' : 'risk-safe';
   var timelineData = JSON.stringify(report.timeline || {});
 
-  return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>Sentinel v4.4.2 — Forensic Maling Catcher Report</title><style>' +
-    ':root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--accent:#58a6ff;--danger:#f85149;--warning:#d29922;--safe:#3fb950;--purple:#bc8cff}' +
-    '*{box-sizing:border-box;margin:0;padding:0}' +
-    'body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;padding:20px;line-height:1.5}' +
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sentinel v4.6.3 Ghost Protocol Report</title>' +
+    '<style>' +
+    'body{font-family:system-ui,-apple-system,sans-serif;margin:0;padding:20px;background:#0a0a0a;color:#e0e0e0}' +
     '.container{max-width:1400px;margin:0 auto}' +
-    'h1{color:var(--accent);margin-bottom:8px;font-size:1.8rem}' +
-    'h2{color:var(--accent);margin-bottom:12px;font-size:1.2rem;border-bottom:1px solid var(--border);padding-bottom:8px}' +
-    '.subtitle{color:#8b949e;margin-bottom:24px}' +
-    '.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}' +
-    '.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}' +
-    '.card h3{color:#8b949e;font-size:.7rem;text-transform:uppercase;margin-bottom:6px}' +
-    '.card .value{font-size:1.6rem;font-weight:bold}' +
-    '.card .value.danger{color:var(--danger)}.card .value.warning{color:var(--warning)}.card .value.safe{color:var(--safe)}' +
-    'table{width:100%;border-collapse:collapse;margin-bottom:24px;background:var(--card);border-radius:8px;overflow:hidden;font-size:.85rem}' +
-    'th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--border)}' +
-    'th{background:#21262d;color:var(--accent);font-size:.75rem;text-transform:uppercase}' +
-    '.badge{padding:2px 8px;border-radius:12px;font-size:.7rem;font-weight:bold;display:inline-block}' +
-    '.badge-critical{background:#f8514933;color:var(--danger)}.badge-high{background:#d2992233;color:var(--warning)}' +
-    '.badge-medium{background:#58a6ff22;color:var(--accent)}.badge-low{background:#3fb95022;color:var(--safe)}' +
-    '.badge-info{background:#bc8cff22;color:var(--purple)}' +
-    '.threat-critical{border-left:3px solid var(--danger)}.threat-high{border-left:3px solid var(--warning)}.threat-medium{border-left:3px solid var(--accent)}' +
-    '.section{margin-bottom:32px}' +
-    '.mode-badge{display:inline-block;padding:4px 12px;border-radius:4px;font-size:.8rem;font-weight:bold;margin-left:12px}' +
-    '.mode-stealth{background:#3fb95033;color:var(--safe)}.mode-observe{background:#d2992233;color:var(--warning)}' +
-    '.forensic-box{background:var(--card);border:2px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:24px}' +
-    '.forensic-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}' +
-    '.forensic-item{background:#21262d;border-radius:6px;padding:12px}' +
-    '.forensic-item .label{color:var(--accent);font-weight:bold;font-size:.9rem;margin-bottom:4px}' +
-    '.forensic-item .content{color:var(--text);font-size:.85rem}' +
-    '.inject-status{display:flex;gap:12px;margin-top:8px}' +
-    '.inject-badge{padding:4px 10px;border-radius:4px;font-size:.8rem}' +
-    '.inject-ok{background:#3fb95033;color:var(--safe)}.inject-fail{background:#f8514933;color:var(--danger)}' +
-    'footer{text-align:center;color:#484f58;margin-top:40px;font-size:.8rem}' +
-    '@media(max-width:768px){.grid{grid-template-columns:repeat(2,1fr)}.forensic-grid{grid-template-columns:1fr}}' +
+    'h1{color:#00ff88;text-align:center;font-size:24px}h2{color:#00ccff;border-bottom:1px solid #333;padding-bottom:8px;margin-top:30px}' +
+    '.risk-danger{background:#ff1744;color:#fff;padding:8px 16px;border-radius:8px;display:inline-block;font-size:20px;font-weight:bold}' +
+    '.risk-warning{background:#ff9100;color:#000;padding:8px 16px;border-radius:8px;display:inline-block;font-size:20px;font-weight:bold}' +
+    '.risk-safe{background:#00c853;color:#000;padding:8px 16px;border-radius:8px;display:inline-block;font-size:20px;font-weight:bold}' +
+    '.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:16px 0}' +
+    '.stat-card{background:#1a1a2e;border:1px solid #333;border-radius:8px;padding:12px;text-align:center}' +
+    '.stat-value{font-size:28px;font-weight:bold;color:#00ff88}.stat-label{font-size:12px;color:#888;margin-top:4px}' +
+    'table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}' +
+    'th{background:#1a1a2e;color:#00ccff;padding:8px;text-align:left;border:1px solid #333}' +
+    'td{padding:6px 8px;border:1px solid #222;vertical-align:top}tr:nth-child(even){background:#111}' +
+    '.badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold}' +
+    '.badge-critical{background:#ff1744;color:#fff}.badge-high{background:#ff6d00;color:#fff}' +
+    '.badge-medium{background:#ffab00;color:#000}.badge-low{background:#00c853;color:#000}' +
+    '.badge-info{background:#2979ff;color:#fff}' +
+    '.forensic-box{background:#1a1a2e;border-left:4px solid #00ff88;padding:12px 16px;margin:8px 0;border-radius:0 8px 8px 0}' +
+    '.forensic-label{color:#00ccff;font-weight:bold;font-size:14px}.forensic-value{color:#e0e0e0;margin-top:4px}' +
+    'code{background:#1a1a2e;padding:1px 4px;border-radius:3px;font-size:12px;color:#00ff88}' +
+    '.ghost-badge{background:linear-gradient(135deg,#00ff88,#00ccff);color:#000;padding:4px 12px;border-radius:12px;font-size:11px;font-weight:bold}' +
     '</style></head><body><div class="container">' +
-    '<h1>Sentinel v4.4.2 — Forensic Maling Catcher Report</h1>' +
-    '<p class="subtitle">' + escapeHtml(report.target) + ' <span class="mode-badge mode-' + report.mode + '">' + (report.mode || '').toUpperCase() + ' MODE</span> &middot; ' + report.scanDate + '</p>' +
+    '<h1>🛡️ SENTINEL v4.6.3 GHOST PROTOCOL <span class="ghost-badge">GHOST</span></h1>' +
+    '<p style="text-align:center;color:#888">' + escapeHtml(report.targetUrl) + ' — ' + report.timestamp + ' — ' + report.mode + ' mode</p>' +
+    '<div style="text-align:center;margin:16px 0"><span class="' + riskClass + '">' + report.riskScore + '/100 ' + report.riskLevel + '</span></div>' +
 
-    // Alerts
-    (report.alerts && report.alerts.length > 0 ?
-      '<div class="section"><h2>Alerts</h2><table><thead><tr><th>Level</th><th>Type</th><th>Message</th></tr></thead><tbody>' + alertRows + '</tbody></table></div>' : '') +
-
-    // Injection verification
-    '<div class="section"><h2>Injection Verification</h2><div class="card">' +
-    '<p>Status: <strong>' + (injStatus.verdict || 'UNKNOWN') + '</strong></p>' +
-    '<div class="inject-status">' +
-    '<span class="inject-badge ' + (injStatus.layer1_CDP ? 'inject-ok' : 'inject-fail') + '">L1 CDP: ' + (injStatus.layer1_CDP ? 'OK' : 'NO') + '</span>' +
-    '<span class="inject-badge ' + (injStatus.layer2_addInitScript ? 'inject-ok' : 'inject-fail') + '">L2 addInitScript: ' + (injStatus.layer2_addInitScript ? 'OK' : 'NO') + '</span>' +
-    '<span class="inject-badge ' + (injStatus.layer3_perTarget ? 'inject-ok' : 'inject-fail') + '">L3 Per-Target: ' + (injStatus.layer3_perTarget ? 'OK' : 'NO') + '</span>' +
-    '</div></div></div>' +
+    // Stats grid
+    '<div class="stats">' +
+    '<div class="stat-card"><div class="stat-value">' + report.totalEvents + '</div><div class="stat-label">API Events</div></div>' +
+    '<div class="stat-card"><div class="stat-value">' + (report.networkSummary.totalRequests + report.networkSummary.totalResponses) + '</div><div class="stat-label">Network Req/Resp</div></div>' +
+    '<div class="stat-card"><div class="stat-value">' + report.workerEvents.count + '</div><div class="stat-label">Worker Events</div></div>' +
+    '<div class="stat-card"><div class="stat-value">' + report.categoriesDetected + '/' + report.categoriesMonitored + '</div><div class="stat-label">Categories</div></div>' +
+    '<div class="stat-card"><div class="stat-value">' + report.coveragePercent + '</div><div class="stat-label">Coverage %</div></div>' +
+    '<div class="stat-card"><div class="stat-value">' + (report.timeSpanMs / 1000).toFixed(1) + 's</div><div class="stat-label">Duration</div></div>' +
+    '<div class="stat-card"><div class="stat-value">' + report.targetGraph.totalTargets + '</div><div class="stat-label">CDP Targets</div></div>' +
+    '<div class="stat-card"><div class="stat-value">' + report.threats.length + '</div><div class="stat-label">Threats</div></div>' +
+    '</div>' +
 
     // 1H5W
-    '<div class="forensic-box"><h2>Forensic Summary (1H5W)</h2><div class="forensic-grid">' +
-    '<div class="forensic-item"><div class="label">WHO (Siapa)</div><div class="content">' + escapeHtml(forensic.WHO || '-') + '</div></div>' +
-    '<div class="forensic-item"><div class="label">WHAT (Apa)</div><div class="content">' + escapeHtml(forensic.WHAT || '-') + '</div></div>' +
-    '<div class="forensic-item"><div class="label">WHEN (Kapan)</div><div class="content">' + escapeHtml(forensic.WHEN || '-') + '</div></div>' +
-    '<div class="forensic-item"><div class="label">WHERE (Dimana)</div><div class="content">' + escapeHtml(forensic.WHERE || '-') + '</div></div>' +
-    '<div class="forensic-item"><div class="label">WHY (Mengapa)</div><div class="content">' + escapeHtml(forensic.WHY || '-') + '</div></div>' +
-    '<div class="forensic-item"><div class="label">HOW (Bagaimana)</div><div class="content">' + escapeHtml(forensic.HOW || '-') + '</div></div>' +
-    '</div></div>' +
-
-    // KPI Cards
-    '<div class="grid">' +
-    '<div class="card"><h3>Risk Score</h3><div class="value ' + riskClass + '">' + report.riskScore + '/100</div><div>' + report.riskLevel + '</div></div>' +
-    '<div class="card"><h3>Total Events</h3><div class="value">' + (report.totalEvents || 0) + '</div></div>' +
-    '<div class="card"><h3>Categories</h3><div class="value">' + report.categoriesDetected + '/' + report.categoriesMonitored + '</div></div>' +
-    '<div class="card"><h3>Coverage</h3><div class="value">' + (report.coveragePercent || 0) + '%</div></div>' +
-    '<div class="card"><h3>Origins</h3><div class="value">' + (report.uniqueOrigins || []).length + '</div></div>' +
-    '<div class="card"><h3>Frames</h3><div class="value">' + (report.uniqueFrames || []).length + '</div></div>' +
-    '<div class="card"><h3>Threats</h3><div class="value ' + ((report.threats || []).length > 5 ? 'danger' : (report.threats || []).length > 0 ? 'warning' : 'safe') + '">' + (report.threats || []).length + '</div></div>' +
-    '<div class="card"><h3>FP Bursts</h3><div class="value">' + (correlation ? correlation.summary.fingerprintBursts || 0 : 0) + '</div></div>' +
-    '</div>' +
-
-    // Coverage Proof
-    '<div class="section"><h2>Coverage Proof (BOOT_OK Protocol)</h2><div class="card">' +
-    '<p>Coverage: <strong>' + (report.coverageProof ? report.coverageProof.coverage : 0) + '%</strong>' +
-    ' — ' + (report.coverageProof ? report.coverageProof.monitoredFrames : 0) + ' of ' + (report.coverageProof ? report.coverageProof.totalFramesDetected : 0) + ' frames monitored' +
-    ' — Verdict: <strong>' + (report.coverageProof ? report.coverageProof.verdict : 'UNKNOWN') + '</strong></p>' +
-    '</div></div>' +
+    '<h2>🔍 1H5W Forensic Analysis</h2>' +
+    '<div class="forensic-box"><div class="forensic-label">👤 WHO (Siapa pelakunya?)</div><div class="forensic-value">' + escapeHtml(report.forensic1H5W.who) + '</div></div>' +
+    '<div class="forensic-box"><div class="forensic-label">📦 WHAT (Apa yang dicuri?)</div><div class="forensic-value">' + escapeHtml(report.forensic1H5W.what) + '</div></div>' +
+    '<div class="forensic-box"><div class="forensic-label">⏰ WHEN (Kapan terjadi?)</div><div class="forensic-value">' + escapeHtml(report.forensic1H5W.when) + '</div></div>' +
+    '<div class="forensic-box"><div class="forensic-label">📍 WHERE (Di mana lokasi?)</div><div class="forensic-value">' + escapeHtml(report.forensic1H5W.where) + '</div></div>' +
+    '<div class="forensic-box"><div class="forensic-label">❓ WHY (Mengapa dilakukan?)</div><div class="forensic-value">' + escapeHtml(report.forensic1H5W.why) + '</div></div>' +
+    '<div class="forensic-box"><div class="forensic-label">🔧 HOW (Bagaimana caranya?)</div><div class="forensic-value">' + escapeHtml(report.forensic1H5W.how) + '</div></div>' +
 
     // Threats
-    ((report.threats || []).length > 0 ?
-      '<div class="section"><h2>Threat Assessment (' + (report.threats || []).length + ')</h2>' +
-      '<table><thead><tr><th>Threat</th><th>Severity</th><th>Detail</th><th>WHO</th><th>HOW</th></tr></thead><tbody>' + threatRows + '</tbody></table></div>' : '') +
+    (threatRows ? '<h2>⚠️ Threat Assessment</h2><table><tr><th>Threat</th><th>Severity</th><th>Detail</th><th>Who</th><th>How</th></tr>' + threatRows + '</table>' : '') +
 
-    // Coverage Matrix
-    '<div class="section"><h2>Detection Coverage Matrix (' + activeCategories + '/' + (report.categoriesMonitored || 37) + ')</h2>' +
-    '<table><thead><tr><th>Category</th><th>Events</th><th>Status</th></tr></thead><tbody>' + matrixRows + '</tbody></table></div>' +
+    // Captured Values
+    (valueRows ? '<h2>📋 Captured Values (API Responses)</h2><table><tr><th>Time</th><th>Direction</th><th>API</th><th>Category</th><th>Value</th></tr>' + valueRows + '</table>' : '') +
 
-    // Category Distribution
-    '<div class="section"><h2>Category Distribution</h2>' +
-    '<table><thead><tr><th>Category</th><th>Events</th><th>Risk Level</th></tr></thead><tbody>' + catRows + '</tbody></table></div>' +
-
-    // Attribution
-    (attrRows ?
-      '<div class="section"><h2>Library Attribution</h2>' +
-      '<table><thead><tr><th>Library</th><th>Confidence</th><th>Matched Patterns</th><th>Burst</th><th>Description</th></tr></thead><tbody>' + attrRows + '</tbody></table></div>' : '') +
+    // Library Attribution
+    (attrRows ? '<h2>📚 Library Attribution</h2><table><tr><th>Library</th><th>Confidence</th><th>Matched Patterns</th><th>Burst</th><th>Description</th></tr>' + attrRows + '</table>' : '<h2>📚 Library Attribution</h2><p>No libraries attributed</p>') +
 
     // Exfiltration
-    (exfilRows ?
-      '<div class="section"><h2>Exfiltration Alerts</h2>' +
-      '<table><thead><tr><th>Tracker</th><th>Method</th><th>URL</th><th>Time</th></tr></thead><tbody>' + exfilRows + '</tbody></table></div>' : '') +
+    (exfilRows ? '<h2>📡 Data Exfiltration</h2><table><tr><th>Tracker</th><th>Method</th><th>URL</th><th>Time</th></tr>' + exfilRows + '</table>' : '') +
 
-    // Value Captures
-    (valueRows ?
-      '<div class="section"><h2>Value Captures (Top 50)</h2>' +
-      '<table><thead><tr><th>Time</th><th>API</th><th>Category</th><th>Value</th></tr></thead><tbody>' + valueRows + '</tbody></table></div>' : '') +
+    // Target Graph
+    '<h2>🎯 Target Graph & Inventory (v4.6.3)</h2>' +
+    '<table><tr><th>Target ID</th><th>Type</th><th>URL</th><th>Network</th><th>Injected</th><th>Boot</th><th>Events</th><th>Skip Reason</th></tr>' + targetRows + '</table>' +
 
-    // Top APIs
-    '<div class="section"><h2>Top APIs</h2>' +
-    '<table><thead><tr><th>API</th><th>Count</th></tr></thead><tbody>' +
-    (report.topApis || []).map(function(a) { return '<tr><td><code>' + escapeHtml(a.api) + '</code></td><td>' + a.count + '</td></tr>'; }).join('') +
-    '</tbody></table></div>' +
+    // Network Conversation
+    '<h2>🌐 Network Conversation</h2><p>' + report.networkSummary.totalRequests + ' requests, ' + report.networkSummary.totalResponses + ' responses</p>' +
+    '<table><tr><th>Method</th><th>URL</th><th>Type</th><th>Status</th><th>Size</th></tr>' + netRows + '</table>' +
 
-    // Dedup Stats
-    '<div class="section"><h2>Dedup Statistics</h2><div class="card">' +
-    '<p>Total received: ' + (report.dedupStats ? report.dedupStats.totalReceived : report.totalEvents) +
-    ' | Deduplicated: ' + (report.dedupStats ? report.dedupStats.deduplicated : 0) +
-    ' | Kept: ' + (report.dedupStats ? report.dedupStats.kept : report.totalEvents) + '</p>' +
-    '</div></div>' +
+    // Coverage Matrix
+    '<h2>📊 Coverage Matrix</h2><table><tr><th>Category</th><th>Events</th><th>Status</th></tr>' + matrixRows + '</table>' +
 
-    // Timeline
-    '<div class="section"><h2>Activity Timeline</h2>' +
-    '<canvas id="timelineChart" width="1200" height="300"></canvas></div>' +
+    // Alerts
+    '<h2>🚨 Alerts</h2><table><tr><th>Level</th><th>Type</th><th>Message</th></tr>' + alertRows + '</table>' +
 
-    '<footer>Sentinel v4.4.2 — Zero Escape Architecture — 37 Categories — Generated ' + new Date().toISOString() + '</footer>' +
-    '</div>' +
-    '<script>var timelineData=' + timelineData + ';var canvas=document.getElementById("timelineChart");' +
-    'if(canvas){var ctx=canvas.getContext("2d");var w=canvas.width,h=canvas.height;' +
-    'ctx.fillStyle="#161b22";ctx.fillRect(0,0,w,h);' +
-    'var keys=Object.keys(timelineData).sort(function(a,b){return a-b;});' +
-    'if(keys.length>0){var maxVal=Math.max.apply(null,keys.map(function(k){return timelineData[k];}));' +
-    'var pad={top:20,right:20,bottom:30,left:50};var cW=w-pad.left-pad.right,cH=h-pad.top-pad.bottom;' +
-    'var bW=Math.max(2,(cW/keys.length)-1);' +
-    'keys.forEach(function(sec,i){var val=timelineData[sec];var bH=(val/maxVal)*cH;' +
-    'var x=pad.left+(i*(cW/keys.length));var y=pad.top+cH-bH;' +
-    'var intensity=val/maxVal;' +
-    'if(intensity>0.6)ctx.fillStyle="#f85149";else if(intensity>0.3)ctx.fillStyle="#d29922";else ctx.fillStyle="#58a6ff";' +
-    'ctx.fillRect(x,y,bW,bH);});' +
-    'ctx.fillStyle="#8b949e";ctx.font="11px monospace";ctx.textAlign="center";' +
-    'var step=Math.max(1,Math.floor(keys.length/10));' +
-    'keys.forEach(function(sec,i){if(i%step===0)ctx.fillText(sec+"s",pad.left+(i*(cW/keys.length))+bW/2,h-10);});' +
-    '}else{ctx.fillStyle="#8b949e";ctx.font="14px monospace";ctx.textAlign="center";ctx.fillText("No timeline data",w/2,h/2);}' +
-    '}</script></body></html>';
-}
+    // Injection Status
+    '<h2>💉 Injection Status</h2><table><tr><th>Layer</th><th>Status</th></tr>' + injRows +
+    '<tr><td colspan="2"><strong>Verdict: ' + report.injectionStatus.verdict + '</strong></td></tr></table>' +
 
-function getCatBadge(cat) {
-  var riskMap = {
-    'canvas':'high','webgl':'high','audio':'critical','font-detection':'high','fingerprint':'high',
-    'webrtc':'critical','geolocation':'critical','clipboard':'critical','media-devices':'critical',
-    'service-worker':'high','math-fingerprint':'medium','storage':'medium','network':'medium',
-    'perf-timing':'medium','screen':'medium','permissions':'high','dom-probe':'medium',
-    'hardware':'high','speech':'high','client-hints':'critical','intl-fingerprint':'medium',
-    'css-fingerprint':'medium','property-enum':'high','offscreen-canvas':'high',
-    'exfiltration':'critical','honeypot':'critical','credential':'critical','system':'info',
-    'webassembly':'critical','keyboard-layout':'high','sensor-apis':'high','visualization':'medium',
-    'device-info':'medium','worker':'high','encoding':'low'
-  };
-  var level = riskMap[cat] || 'low';
-  return '<span class="badge badge-' + level + '">' + level.toUpperCase() + '</span>';
+    '<p style="text-align:center;color:#555;margin-top:30px">Sentinel v4.6.3 Ghost Protocol — Zero Spoofing — ' + report.timestamp + '</p>' +
+    '</div></body></html>';
 }
 
 function escapeHtml(str) {

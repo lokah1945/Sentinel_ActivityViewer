@@ -1,5 +1,5 @@
 /**
- * Sentinel v4.4.2 — Anti-Detection Shield (Layer 2)
+ * Sentinel v4.4.1 — Anti-Detection Shield (Layer 2)
  * 
  * Preserves WeakMap descriptor cache from v4.3.
  * Exports as TEMPLATE STRING (not function reference) for correct MAIN world execution.
