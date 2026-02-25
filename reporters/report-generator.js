@@ -1,240 +1,233 @@
-/**
- * Sentinel v3 — Report Generator
- * Produces JSON, HTML, and context-map outputs
- */
+// ═══════════════════════════════════════════════════════════════
+//  SENTINEL v7.0.0 — UNIFIED REPORT GENERATOR
+// ═══════════════════════════════════════════════════════════════
+// CHANGE LOG v7.0.0 (2026-02-26):
+//   - FROM v6.4: report-generator.js HTML/JSON/CTX structure
+//   - NEW: Hook stats section in HTML (hookEvents, hookCategories)
+//   - NEW: Source breakdown (hook vs CDP vs page)
+//   - NEW: Dual-telemetry dashboard KPIs
+//   - FIX: REG-012 — No unscoped `vc` variable in report
+//   - FIX: HTML responsive design preserved from v6.4
+//
+// LAST HISTORY LOG:
+//   v6.4.0: report-generator.js (lib/) — CDP-only stats
+//   v7.0.0: Enhanced with dual-telemetry stats
+// ═══════════════════════════════════════════════════════════════
 
-const fs = require('fs');
-const path = require('path');
+'use strict';
 
-function generateReport(sentinelData, contextMap, targetUrl, options = {}) {
-  const outputDir = options.outputDir || path.join(__dirname, '..', 'output');
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const prefix = options.prefix || `sentinel_${timestamp}`;
+var fs = require('fs');
+var path = require('path');
 
-  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
-  const events = sentinelData.events || [];
-
-  // ── Analyze events ──
-  const byCategory = {};
-  const byRisk = { low: 0, medium: 0, high: 0, critical: 0 };
-  const apiCounts = {};
-  const originSet = new Set();
-  const timelineSlots = {};
-
-  for (const e of events) {
-    byCategory[e.cat] = (byCategory[e.cat] || 0) + 1;
-    byRisk[e.risk] = (byRisk[e.risk] || 0) + 1;
-    apiCounts[e.api] = (apiCounts[e.api] || 0) + 1;
-    originSet.add(e.origin);
-
-    const slot = Math.floor(e.ts / 1000);
-    timelineSlots[slot] = (timelineSlots[slot] || 0) + 1;
+class ReportGenerator {
+  constructor(version) {
+    this.version = version;
+    this.outputDir = path.join(process.cwd(), 'output');
+    if (!fs.existsSync(this.outputDir)) fs.mkdirSync(this.outputDir, { recursive: true });
   }
 
-  const topApis = Object.entries(apiCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 20)
-    .map(([api, count]) => ({ api, count }));
+  save(mode, ts, events, analysis, context) {
+    var base = 'sentinel-' + mode + '-' + ts;
+    var jp = path.join(this.outputDir, base + '-report.json');
+    var hp = path.join(this.outputDir, base + '-report.html');
+    var cp = path.join(this.outputDir, base + '-context.json');
 
-  // ── Risk Score calculation ──
-  const riskScore = Math.min(100, Math.round(
-    (byRisk.critical * 15) +
-    (byRisk.high * 5) +
-    (byRisk.medium * 1) +
-    (byRisk.low * 0.1) +
-    (Object.keys(byCategory).length * 3) +
-    (originSet.size > 2 ? (originSet.size - 1) * 5 : 0)
-  ));
+    fs.writeFileSync(jp, JSON.stringify({
+      version: this.version,
+      target: context.target,
+      mode: mode,
+      timestamp: new Date(ts).toISOString(),
+      events: events,
+      analysis: analysis
+    }, null, 2));
 
-  // ── Threat Assessment ──
-  const threats = [];
-  if (byCategory['audio'] > 0) threats.push({ type: 'Audio Fingerprinting', severity: 'HIGH', detail: `${byCategory['audio']} audio API calls detected` });
-  if (byCategory['canvas'] > 0) threats.push({ type: 'Canvas Fingerprinting', severity: 'HIGH', detail: `${byCategory['canvas']} canvas operations` });
-  if (byCategory['webgl'] > 0) threats.push({ type: 'WebGL Fingerprinting', severity: 'HIGH', detail: `${byCategory['webgl']} WebGL parameter reads` });
-  if (byCategory['font-detection'] > 50) threats.push({ type: 'Font Enumeration', severity: 'CRITICAL', detail: `${byCategory['font-detection']} font probing calls — likely full font scan` });
-  if (byCategory['webrtc'] > 0) threats.push({ type: 'WebRTC IP Leak Attempt', severity: 'CRITICAL', detail: `${byCategory['webrtc']} WebRTC connection attempts` });
-  if (byCategory['geolocation'] > 0) threats.push({ type: 'Geolocation Request', severity: 'CRITICAL', detail: `Attempted to read device location` });
-  if (byCategory['clipboard'] > 0) threats.push({ type: 'Clipboard Access', severity: 'CRITICAL', detail: `Attempted clipboard read/write` });
-  if (byCategory['media-devices'] > 0) threats.push({ type: 'Media Device Enumeration', severity: 'HIGH', detail: `Attempted to list cameras/microphones` });
-  if (byCategory['service-worker'] > 0) threats.push({ type: 'Service Worker Registration', severity: 'HIGH', detail: `Attempted persistent background code` });
-  if (byCategory['math-fingerprint'] > 10) threats.push({ type: 'Math Fingerprinting', severity: 'MEDIUM', detail: `${byCategory['math-fingerprint']} Math function probes` });
-  if (byCategory['storage'] > 50) threats.push({ type: 'Aggressive Storage Usage', severity: 'MEDIUM', detail: `${byCategory['storage']} storage operations` });
-  if (originSet.size > 3) threats.push({ type: 'Multi-Origin Tracking', severity: 'HIGH', detail: `${originSet.size} unique origins detected — possible cross-domain tracking` });
+    fs.writeFileSync(cp, JSON.stringify(context, null, 2));
+    fs.writeFileSync(hp, this._html(analysis, context, events));
 
-  // ── FingerprintJS v5 detection ──
-  const fpjsSignature = events.some(e => e.api === 'isPointInPath' && e.cat === 'canvas') &&
-    events.some(e => e.cat === 'audio') &&
-    events.some(e => e.cat === 'font-detection') &&
-    events.some(e => e.cat === 'math-fingerprint');
-  if (fpjsSignature) {
-    threats.push({ type: '⚠️ FingerprintJS-like Library Detected', severity: 'CRITICAL',
-      detail: 'Combination of canvas(isPointInPath), audio, font-detection, and math fingerprinting matches FingerprintJS v5 pattern' });
+    return { json: jp, html: hp, context: cp };
   }
 
-  const reportJson = {
-    version: 'sentinel-v3.0.0',
-    target: targetUrl,
-    scanDate: new Date().toISOString(),
-    mode: options.stealthEnabled ? 'stealth' : 'observe',
-    totalEvents: events.length,
-    riskScore,
-    riskLevel: riskScore >= 70 ? 'DANGER 🔴' : riskScore >= 40 ? 'WARNING 🟡' : 'LOW 🟢',
-    timeSpanMs: events.length > 0 ? events[events.length - 1].ts : 0,
-    byCategory,
-    byRisk,
-    topApis,
-    uniqueOrigins: [...originSet],
-    threats,
-    categoriesMonitored: 18,
-    categoriesDetected: Object.keys(byCategory).length,
-    timeline: timelineSlots
-  };
+  _html(analysis, ctx, events) {
+    var cats = analysis.categories || [];
+    var threats = analysis.threats || [];
+    var libs = analysis.libraryDetections || [];
+    var netConv = analysis.networkConversation || [];
+    var cookies = analysis.cookies || {};
+    var ws = analysis.websockets || [];
+    var tp = analysis.thirdParties || [];
+    var entropy = analysis.entropy || {};
+    var h5w = analysis.h5w || {};
+    var riskScore = analysis.riskScore || 0;
+    var hookStats = analysis.hookStats || {};
+    var pStats = analysis.pipelineStats || {};
+    var bursts = analysis.bursts || [];
+    var exfil = analysis.exfiltration || [];
+    var timeline = analysis.timeline || [];
 
-  // ── Save JSON ──
-  const jsonPath = path.join(outputDir, `${prefix}_report.json`);
-  fs.writeFileSync(jsonPath, JSON.stringify(reportJson, null, 2));
+    var h = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">';
+    h += '<title>' + this.version + ' ' + ctx.target + '</title>';
+    h += '<style>';
+    h += '*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6}';
+    h += '.c{max-width:1400px;margin:0 auto;padding:20px}header{text-align:center;padding:30px 0;border-bottom:1px solid #30363d}';
+    h += 'h1{color:#58a6ff;font-size:1.8em}h2{color:#58a6ff;margin:20px 0 10px;font-size:1.2em;border-bottom:1px solid #21262d;padding-bottom:5px}';
+    h += '.sub{color:#8b949e;margin-top:8px}.kg{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin:16px 0}';
+    h += '.k{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;text-align:center}';
+    h += '.k.g{border-color:#238636}.k.w{border-color:#d29922}.k.b{border-color:#da3633}';
+    h += '.kv{font-size:1.5em;font-weight:bold;color:#f0f6fc}.kl{color:#8b949e;font-size:0.8em;margin-top:4px}';
+    h += 'table{width:100%;border-collapse:collapse;margin:8px 0;font-size:0.85em}';
+    h += 'th,td{padding:6px 10px;text-align:left;border-bottom:1px solid #21262d}th{background:#161b22;color:#58a6ff;font-weight:600}';
+    h += 'tr:hover{background:#161b22}.bd{background:#238636;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.75em}';
+    h += '.rc{color:#ff7b72;font-weight:bold}.rh{color:#ffa657}.rm{color:#d29922}.rl{color:#8b949e}';
+    h += '.u{max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}';
+    h += '.hb{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px;margin:6px 0}';
+    h += '.hb h3{color:#ffa657;margin-bottom:4px;font-size:1em}';
+    h += '.hybrid{background:#0d4429;color:#3fb950;padding:4px 12px;border-radius:6px;display:inline-block;margin:8px 0;font-weight:bold}';
+    h += 'footer{text-align:center;color:#484f58;padding:20px 0;border-top:1px solid #21262d;margin-top:20px;font-size:0.85em}';
+    h += '</style></head><body><div class="c">';
 
-  // ── Save Context Map ──
-  const ctxPath = path.join(outputDir, `${prefix}_context-map.json`);
-  fs.writeFileSync(ctxPath, JSON.stringify(contextMap || [], null, 2));
+    // ─── HEADER ───
+    h += '<header>';
+    h += '<h1>\uD83D\uDEE1\uFE0F ' + this.version + ' \u2014 Hybrid Dual-Telemetry CCTV</h1>';
+    h += '<p class="sub">Target: <strong>' + ctx.target + '</strong> | Mode: <strong>' + ctx.mode + '</strong> | ' + ctx.scanDate + '</p>';
+    h += '<span class="hybrid">HOOK + CDP DUAL ENGINE</span>';
+    h += '</header>';
 
-  // ── Generate HTML ──
-  const htmlPath = path.join(outputDir, `${prefix}_report.html`);
-  const html = generateHTML(reportJson, events);
-  fs.writeFileSync(htmlPath, html);
+    // ─── KPI DASHBOARD ───
+    h += '<h2>\uD83D\uDCCA Dashboard</h2><div class="kg">';
+    h += this._kpi(events.length, 'Total Events', events.length >= 1500 ? 'g' : events.length >= 500 ? 'w' : 'b');
+    h += this._kpi(cats.length, 'Categories', cats.length >= 30 ? 'g' : cats.length >= 15 ? 'w' : 'b');
+    h += this._kpi(riskScore, 'Risk Score', riskScore >= 50 ? 'b' : riskScore >= 20 ? 'w' : 'g');
+    h += this._kpi(pStats.hookEvents || 0, 'Hook Events', 'w');
+    h += this._kpi(pStats.cdpEvents || 0, 'CDP Events', 'w');
+    h += this._kpi(pStats.pageEvents || 0, 'Page Events', 'w');
+    h += this._kpi(libs.length, 'Libraries', libs.length > 0 ? 'b' : 'g');
+    h += this._kpi(hookStats.totalCategories || 0, 'Cat Coverage', '');
+    h += '</div>';
 
-  return { jsonPath, ctxPath, htmlPath, reportJson };
+    // ─── HOOK VS CDP BREAKDOWN ───
+    if (hookStats.hookEventCount || hookStats.cdpEventCount) {
+      h += '<h2>\uD83D\uDD0D Source Telemetry Breakdown</h2>';
+      h += '<div class="hb">';
+      h += '<h3>Hook Layer: ' + (hookStats.hookEventCount || 0) + ' events in ' + (hookStats.hookCategories || []).length + ' categories</h3>';
+      h += '<p style="color:#8b949e;font-size:0.85em">' + (hookStats.hookCategories || []).join(', ') + '</p>';
+      h += '</div>';
+      h += '<div class="hb">';
+      h += '<h3>CDP Observer: ' + (hookStats.cdpEventCount || 0) + ' events in ' + (hookStats.cdpCategories || []).length + ' categories</h3>';
+      h += '<p style="color:#8b949e;font-size:0.85em">' + (hookStats.cdpCategories || []).join(', ') + '</p>';
+      h += '</div>';
+    }
+
+    // ─── CATEGORIES TABLE ───
+    h += '<h2>\uD83D\uDCDD Event Categories (' + cats.length + ')</h2>';
+    h += '<table><tr><th>Category</th><th>Events</th><th>Risk</th><th>Sources</th></tr>';
+    for (var i = 0; i < cats.length; i++) {
+      var c = cats[i];
+      var rc = c.risk === 'critical' ? 'rc' : c.risk === 'high' ? 'rh' : c.risk === 'medium' ? 'rm' : 'rl';
+      var srcStr = Object.entries(c.sources || {}).map(function(e) { return e[0] + ':' + e[1]; }).join(', ');
+      h += '<tr><td>' + c.name + '</td><td>' + c.events + '</td><td class="' + rc + '">' + c.risk + '</td><td>' + srcStr + '</td></tr>';
+    }
+    h += '</table>';
+
+    // ─── THREATS ───
+    if (threats.length > 0) {
+      h += '<h2>\u26A0\uFE0F Threats (' + threats.length + ')</h2>';
+      h += '<table><tr><th>Risk</th><th>Category</th><th>API</th><th>Detail</th><th>Src</th></tr>';
+      for (var i = 0; i < Math.min(threats.length, 100); i++) {
+        var t = threats[i];
+        var tc = t.risk === 'critical' ? 'rc' : 'rh';
+        h += '<tr><td class="' + tc + '">' + t.risk + '</td><td>' + t.category + '</td><td>' + t.api + '</td><td class="u">' + (t.detail || '').slice(0, 120) + '</td><td>' + (t.src || '') + '</td></tr>';
+      }
+      h += '</table>';
+    }
+
+    // ─── LIBRARIES ───
+    if (libs.length > 0) {
+      h += '<h2>\uD83D\uDCDA Detected Libraries (' + libs.length + ')</h2>';
+      h += '<table><tr><th>Library</th><th>Confidence</th><th>Patterns</th><th>URL</th></tr>';
+      for (var i = 0; i < libs.length; i++) {
+        var l = libs[i];
+        h += '<tr><td><strong>' + l.name + '</strong></td><td>' + l.confidence + '</td><td>' + (l.patterns || []).join(', ') + '</td><td class="u">' + (l.url || '').slice(0, 100) + '</td></tr>';
+      }
+      h += '</table>';
+    }
+
+    // ─── NETWORK CONVERSATION ───
+    h += '<h2>\uD83C\uDF10 Network Conversation (' + netConv.length + ')</h2>';
+    h += '<table><tr><th>Method</th><th>URL</th><th>Status</th><th>Size</th><th>Type</th><th>IP</th></tr>';
+    for (var i = 0; i < Math.min(netConv.length, 200); i++) {
+      var n = netConv[i];
+      h += '<tr><td>' + (n.method || '') + '</td><td class="u">' + (n.url || '').slice(0, 120) + '</td><td>' + (n.status || '') + '</td><td>' + (n.size || '') + '</td><td>' + (n.type || '') + '</td><td>' + (n.ip || '') + '</td></tr>';
+    }
+    h += '</table>';
+
+    // ─── EXFILTRATION ───
+    if (exfil.length > 0) {
+      h += '<h2>\uD83D\uDEA8 Exfiltration (' + exfil.length + ')</h2>';
+      h += '<table><tr><th>Method</th><th>Detail</th><th>Risk</th><th>Source</th></tr>';
+      for (var i = 0; i < Math.min(exfil.length, 100); i++) {
+        var e = exfil[i];
+        h += '<tr><td>' + (e.method || '') + '</td><td class="u">' + (e.detail || '').slice(0, 120) + '</td><td>' + (e.risk || '') + '</td><td>' + (e.src || '') + '</td></tr>';
+      }
+      h += '</table>';
+    }
+
+    // ─── COOKIES ───
+    h += '<h2>\uD83C\uDF6A Cookies & Storage</h2>';
+    h += '<div class="kg">';
+    h += this._kpi(cookies.cookiesSet || 0, 'Cookies Set', '');
+    h += this._kpi(cookies.cookiesSent || 0, 'Cookies Sent', '');
+    h += this._kpi(cookies.storageAccess || 0, 'Storage Access', '');
+    h += '</div>';
+
+    // ─── THIRD PARTIES ───
+    if (tp.length > 0) {
+      h += '<h2>\uD83C\uDF0D Third Parties (' + tp.length + ')</h2>';
+      h += '<table><tr><th>Domain</th><th>Requests</th><th>Types</th></tr>';
+      for (var i = 0; i < Math.min(tp.length, 50); i++) {
+        h += '<tr><td>' + tp[i].domain + '</td><td>' + tp[i].requests + '</td><td>' + (tp[i].types || []).join(', ') + '</td></tr>';
+      }
+      h += '</table>';
+    }
+
+    // ─── 5W1H ───
+    h += '<h2>\uD83D\uDD0E 5W1H Forensic Summary</h2>';
+    if (h5w.who) {
+      h += '<div class="hb"><h3>WHO</h3><p>Origins: ' + (h5w.who.origins || []).join(', ') + ' | Events: ' + (h5w.who.eventCount || 0) + '</p></div>';
+    }
+    if (h5w.what) {
+      h += '<div class="hb"><h3>WHAT</h3><p>' + Object.entries(h5w.what || {}).map(function(e) { return e[0] + ': ' + e[1]; }).join(', ') + '</p></div>';
+    }
+    if (h5w.when) {
+      h += '<div class="hb"><h3>WHEN</h3><p>Duration: ' + (h5w.when.durationMs || 0) + 'ms | Start: ' + (h5w.when.start || '') + '</p></div>';
+    }
+    if (h5w.where) {
+      h += '<div class="hb"><h3>WHERE</h3><p>Frames: ' + (h5w.where.frames || []).length + ' | Origins: ' + (h5w.where.origins || []).join(', ') + '</p></div>';
+    }
+    if (h5w.why) {
+      h += '<div class="hb"><h3>WHY</h3><p>Libraries: ' + (h5w.why.librariesDetected || []).join(', ') + ' | Cookies: ' + (h5w.why.cookiesSet || 0) + ' | Exfiltration: ' + (h5w.why.exfiltrationAttempts || 0) + '</p></div>';
+    }
+    if (h5w.how) {
+      h += '<div class="hb"><h3>HOW</h3><p>Data channels: ' + (h5w.how.dataChannels || []).join(', ') + '</p></div>';
+    }
+
+    // ─── ENTROPY ───
+    h += '<h2>\uD83E\uDDE0 Entropy Analysis</h2>';
+    h += '<div class="kg">';
+    h += this._kpi(entropy.categoryEntropy || 0, 'Category Entropy', '');
+    h += this._kpi(entropy.apiEntropy || 0, 'API Entropy', '');
+    h += '</div>';
+
+    // ─── FOOTER ───
+    h += '<footer><p>' + this.version + ' | Hybrid Dual-Telemetry CCTV | Generated ' + new Date().toISOString() + '</p>';
+    h += '<p>Hook Events: ' + (pStats.hookEvents || 0) + ' | CDP Events: ' + (pStats.cdpEvents || 0) + ' | Page Events: ' + (pStats.pageEvents || 0) + ' | Total Deduped: ' + (pStats.totalDeduped || events.length) + '</p>';
+    h += '</footer></div></body></html>';
+
+    return h;
+  }
+
+  _kpi(val, label, cls) {
+    return '<div class="k ' + (cls || '') + '"><div class="kv">' + val + '</div><div class="kl">' + label + '</div></div>';
+  }
 }
 
-function generateHTML(report, events) {
-  const catRows = Object.entries(report.byCategory)
-    .sort((a, b) => b[1] - a[1])
-    .map(([cat, count]) => `<tr><td>${cat}</td><td>${count}</td><td>${getCatBadge(cat)}</td></tr>`)
-    .join('');
-
-  const apiRows = report.topApis
-    .map(a => `<tr><td><code>${a.api}</code></td><td>${a.count}</td></tr>`)
-    .join('');
-
-  const threatRows = report.threats
-    .map(t => `<tr class="threat-${t.severity.toLowerCase()}"><td>${t.type}</td><td><span class="badge badge-${t.severity.toLowerCase()}">${t.severity}</span></td><td>${t.detail}</td></tr>`)
-    .join('');
-
-  const riskClass = report.riskScore >= 70 ? 'danger' : report.riskScore >= 40 ? 'warning' : 'safe';
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sentinel v3 — Maling Catcher Report</title>
-<style>
-  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #58a6ff; --danger: #f85149; --warning: #d29922; --safe: #3fb950; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; padding: 20px; }
-  .container { max-width: 1200px; margin: 0 auto; }
-  h1 { color: var(--accent); margin-bottom: 8px; font-size: 1.8rem; }
-  .subtitle { color: #8b949e; margin-bottom: 24px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-  .card h3 { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; margin-bottom: 8px; }
-  .card .value { font-size: 2rem; font-weight: bold; }
-  .card .value.danger { color: var(--danger); }
-  .card .value.warning { color: var(--warning); }
-  .card .value.safe { color: var(--safe); }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 24px; background: var(--card); border-radius: 8px; overflow: hidden; }
-  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
-  th { background: #21262d; color: var(--accent); font-size: 0.8rem; text-transform: uppercase; }
-  .badge { padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: bold; }
-  .badge-critical { background: #f8514933; color: var(--danger); }
-  .badge-high { background: #d2992233; color: var(--warning); }
-  .badge-medium { background: #58a6ff22; color: var(--accent); }
-  .badge-low { background: #3fb95022; color: var(--safe); }
-  .threat-critical { border-left: 3px solid var(--danger); }
-  .threat-high { border-left: 3px solid var(--warning); }
-  .threat-medium { border-left: 3px solid var(--accent); }
-  .section { margin-bottom: 32px; }
-  .section h2 { color: var(--accent); margin-bottom: 12px; font-size: 1.2rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-  .mode-badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; margin-left: 12px; }
-  .mode-stealth { background: #3fb95033; color: var(--safe); }
-  .mode-observe { background: #d2992233; color: var(--warning); }
-  .origin-list { display: flex; gap: 8px; flex-wrap: wrap; }
-  .origin-tag { background: #21262d; border: 1px solid var(--border); padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; }
-  footer { text-align: center; color: #484f58; margin-top: 40px; font-size: 0.8rem; }
-</style>
-</head>
-<body>
-<div class="container">
-  <h1>🛡️ Sentinel v3 — Maling Catcher Report</h1>
-  <p class="subtitle">${report.target} <span class="mode-badge mode-${report.mode}">${report.mode.toUpperCase()} MODE</span></p>
-
-  <div class="grid">
-    <div class="card"><h3>Risk Score</h3><div class="value ${riskClass}">${report.riskScore}/100</div><div>${report.riskLevel}</div></div>
-    <div class="card"><h3>Total Events</h3><div class="value">${report.totalEvents.toLocaleString()}</div></div>
-    <div class="card"><h3>Categories Detected</h3><div class="value">${report.categoriesDetected}/${report.categoriesMonitored}</div></div>
-    <div class="card"><h3>Unique Origins</h3><div class="value">${report.uniqueOrigins.length}</div></div>
-    <div class="card"><h3>Threats Found</h3><div class="value ${report.threats.length > 3 ? 'danger' : report.threats.length > 0 ? 'warning' : 'safe'}">${report.threats.length}</div></div>
-    <div class="card"><h3>Scan Duration</h3><div class="value">${(report.timeSpanMs / 1000).toFixed(1)}s</div></div>
-  </div>
-
-  ${report.threats.length > 0 ? `
-  <div class="section">
-    <h2>🚨 Threat Assessment</h2>
-    <table><thead><tr><th>Threat</th><th>Severity</th><th>Detail</th></tr></thead><tbody>${threatRows}</tbody></table>
-  </div>` : ''}
-
-  <div class="section">
-    <h2>📊 Activity by Category</h2>
-    <table><thead><tr><th>Category</th><th>Events</th><th>Risk Level</th></tr></thead><tbody>${catRows}</tbody></table>
-  </div>
-
-  <div class="section">
-    <h2>🔍 Top APIs Called</h2>
-    <table><thead><tr><th>API</th><th>Count</th></tr></thead><tbody>${apiRows}</tbody></table>
-  </div>
-
-  <div class="section">
-    <h2>🌐 Origins Detected</h2>
-    <div class="origin-list">${report.uniqueOrigins.map(o => `<span class="origin-tag">${o}</span>`).join('')}</div>
-  </div>
-
-  <div class="section">
-    <h2>📈 Risk Breakdown</h2>
-    <div class="grid">
-      <div class="card"><h3>Critical</h3><div class="value danger">${report.byRisk.critical || 0}</div></div>
-      <div class="card"><h3>High</h3><div class="value warning">${report.byRisk.high || 0}</div></div>
-      <div class="card"><h3>Medium</h3><div class="value" style="color:var(--accent)">${report.byRisk.medium || 0}</div></div>
-      <div class="card"><h3>Low</h3><div class="value safe">${report.byRisk.low || 0}</div></div>
-    </div>
-  </div>
-
-  <footer>Sentinel v3.0.0 — Maling Catcher | Scan: ${report.scanDate}</footer>
-</div>
-</body></html>`;
-}
-
-function getCatBadge(cat) {
-  const map = {
-    'audio': '<span class="badge badge-critical">CRITICAL</span>',
-    'webrtc': '<span class="badge badge-critical">CRITICAL</span>',
-    'geolocation': '<span class="badge badge-critical">CRITICAL</span>',
-    'clipboard': '<span class="badge badge-critical">CRITICAL</span>',
-    'media-devices': '<span class="badge badge-critical">CRITICAL</span>',
-    'canvas': '<span class="badge badge-high">HIGH</span>',
-    'webgl': '<span class="badge badge-high">HIGH</span>',
-    'font-detection': '<span class="badge badge-high">HIGH</span>',
-    'fingerprint': '<span class="badge badge-high">HIGH</span>',
-    'math-fingerprint': '<span class="badge badge-high">HIGH</span>',
-    'permissions': '<span class="badge badge-high">HIGH</span>',
-    'service-worker': '<span class="badge badge-high">HIGH</span>',
-    'storage': '<span class="badge badge-medium">MEDIUM</span>',
-    'network': '<span class="badge badge-medium">MEDIUM</span>',
-    'screen': '<span class="badge badge-medium">MEDIUM</span>',
-    'perf-timing': '<span class="badge badge-medium">MEDIUM</span>',
-    'dom-probe': '<span class="badge badge-medium">MEDIUM</span>',
-    'hardware': '<span class="badge badge-medium">MEDIUM</span>',
-  };
-  return map[cat] || '<span class="badge badge-low">LOW</span>';
-}
-
-module.exports = { generateReport };
+module.exports = { ReportGenerator };

@@ -1,119 +1,83 @@
-# Sentinel v6.4.0
-# 🛡️ Sentinel Activity Viewer v6.3.0 — Pure Observer CCTV
+# SENTINEL v7.0.0 — Hybrid Dual-Telemetry Forensic Engine
 
-> Zero Injection. Zero Spoofing. 100% Passive CDP Observation.
+> **PURE NEW CONCEPT** — No backward compatibility. Full rewrite combining the best of v6.4 (CDP/persistent/rebrowser) and v5.0.0/v6.1 (hook layer/push telemetry).
 
-## Philosophy
+## Architecture
 
-Sentinel is a **CCTV security camera**, not a disguise.
+**12-Layer Pipeline:**
 
-- **ZERO injection** — not a single line of JavaScript is injected into any page
-- **ZERO spoofing** — no UA override, no locale change, no viewport override, nothing
-- **ZERO modification** — the browser behaves 100% like a normal browser
-- **100% passive** — all monitoring via CDP event subscriptions from outside the page
-- The "thief" (website fingerprinting/tracking your browser) has NO idea it's being watched
+| Layer | Component | Source |
+|-------|-----------|--------|
+| L1 | Persistent Browser Launch | v6.4 |
+| L2 | Stealth Plugin + rebrowser patches | v6.4 |
+| L3 | addInitScript Injection (Shield + Interceptor) | v5.0/v6.1 RESTORED |
+| L4 | CDP Session + Runtime.addBinding | v6.1 |
+| L5 | Push Telemetry Receiver (500ms) | v6.1 RESTORED |
+| L6 | TargetGraph Recursive Auto-Attach | v6.4 |
+| L7 | Worker Pipeline | v6.4 |
+| L8 | Frame Lifecycle Handlers | v6.1 RESTORED |
+| L9 | CDP Domain Collectors | v6.4 |
+| L10 | Bidirectional Network Capture | v6.1 RESTORED |
+| L11 | Parallel Collection + Dedup + Merge | NEW |
+| L12 | Unified Report (JSON + HTML + CTX) | v6.4 Enhanced |
 
-## What Changed from v6.1/v6.2
+## 42 Detection Categories
 
-| Issue | v6.1 | v6.2 | v6.3 |
-|-------|------|------|------|
-| Runtime.Enable leak | ❌ Active | ✅ Fixed (rebrowser-patches) | ✅ Fixed (rebrowser-playwright-core) |
-| Windows install | ✅ Works | ❌ `patch.exe not found` | ✅ npm alias, no patch needed |
-| JS injection into page | ✅ Heavy (42 API hooks) | ✅ Heavy (42 API hooks) | ❌ ZERO injection |
-| UA/locale spoofing | ✅ Yes | ✅ Yes | ❌ ZERO spoofing |
-| Detection by website | ❌ Risk 100/100 | ❓ Untested | ✅ Pure CDP observation |
-| Plugin support | ✅ playwright-extra | ✅ playwright-extra | ✅ playwright-extra |
-
-### Key Fix: npm Alias (No patch.exe Required)
-
-```json
-{
-  "playwright-core": "npm:rebrowser-playwright-core@^1.52.0"
-}
-```
-
-This tells npm: "when code does `require('playwright-core')`, give it `rebrowser-playwright-core` instead." The Runtime.Enable fix is pre-applied — no `patch.exe` needed on Windows.
+canvas, webgl, audio, font-detection, fingerprint, screen, storage, network,
+perf-timing, media-devices, dom-probe, clipboard, geolocation, service-worker,
+hardware, exfiltration, webrtc, math-fingerprint, permissions, speech,
+client-hints, intl-fingerprint, css-fingerprint, property-enum, offscreen-canvas,
+honeypot, credential, system, encoding, worker, webassembly, keyboard-layout,
+sensor-apis, visualization, battery, event-monitoring, blob-url,
+shared-array-buffer, postmessage-exfil, device-info, cross-frame-comm,
++ CDP categories (network-request, network-response, cookie-set, cookie-sent,
+frame-lifecycle, security-state, browser-log, dom-mutation, library-detected, etc.)
 
 ## Quick Start
 
 ```bash
-# Install (works on Windows without Git/patch.exe)
 npm install
-
-# Run
-node index.js https://browserscan.net --dual-mode --no-headless
-
-# With persistent profile
-node index.js https://example.com --persist=./profiles/session1 --no-headless
-
-# Run regression tests
-npm test
+node index.js https://browserscan.net stealth 30000
+node index.js https://example.com observe 15000
 ```
 
-## Architecture
+## Tests
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  playwright-extra (plugin framework)                     │
-├─────────────────────────────────────────────────────────┤
-│  rebrowser-playwright-core (aliased as playwright-core)  │
-│  └── Runtime.Enable: PRE-PATCHED at source level        │
-│  └── sourceURL: analytics.js (no pptr: leak)            │
-├─────────────────────────────────────────────────────────┤
-│  puppeteer-extra-plugin-stealth                          │
-│  └── Removes Chromium automation artifacts               │
-│  └── Does NOT inject anything — just cleans up defaults  │
-├─────────────────────────────────────────────────────────┤
-│  Sentinel Observer Layers (ALL passive CDP)              │
-│  ├── CdpObserverEngine (8 CDP domains)                   │
-│  │   ├── Network.* (requests, responses, WS, cookies)   │
-│  │   ├── Security.* (TLS, certificates)                  │
-│  │   ├── Page.* (navigation, frames, downloads)          │
-│  │   ├── Performance.* (metrics)                         │
-│  │   ├── Console/Runtime (console.log, exceptions)       │
-│  │   ├── Audits.* (mixed content, issues)                │
-│  │   └── Log.* (browser-level logs)                      │
-│  ├── FrameTreeWatcher (Target.setAutoAttach recursive)   │
-│  ├── PageScopeWatcher (new tabs/popups auto-attach)      │
-│  ├── EventPipeline (dedup + stats)                       │
-│  ├── ForensicEngine (5W1H analysis)                      │
-│  └── ReportGenerator (JSON + HTML)                       │
-└─────────────────────────────────────────────────────────┘
+```bash
+npm test                  # 28 regression rules
+npm run test:injection    # Injection content validation
+npm run test:full         # All tests
 ```
 
-## CLI Options
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `<URL>` | Target URL | required |
-| `--dual-mode` | Run observe + stealth | off |
-| `--no-headless` | Visible browser | headless |
-| `--no-stealth` | Disable stealth plugin | on |
-| `--timeout=<ms>` | Nav timeout | 60000 |
-| `--wait=<ms>` | Observation time | 30000 |
-| `--persist=<dir>` | Persistent profile | ephemeral |
-
-## Files
+## File Structure
 
 ```
-sentinel-v6.3.0/
-├── index.js                          # Main orchestrator
-├── package.json                      # npm alias config
-├── test-regression.js                # Automated tests
+sentinel-v7/
+├── index.js                          # Main orchestrator (12-layer pipeline)
+├── package.json
+├── hooks/
+│   ├── anti-detection-shield.js      # Shield + Quiet Mode + toString protection
+│   ├── api-interceptor.js            # 42 categories, 110+ hooks, push telemetry
+│   └── stealth-config.js             # Minimal stealth plugin config
 ├── lib/
-│   ├── cdp-observer-engine.js        # 8 CDP domain observers
-│   ├── frame-tree-watcher.js         # Recursive target/frame discovery
-│   ├── page-scope-watcher.js         # Multi-tab monitoring
-│   ├── event-pipeline.js             # Event bus + dedup
-│   ├── forensic-engine.js            # 5W1H + threat analysis
-│   └── report-generator.js           # JSON + HTML reports
-└── output/                           # Report output
+│   ├── event-pipeline.js             # Unified dual-source pipeline
+│   ├── cdp-observer-engine.js        # CDP domain collectors
+│   ├── target-graph.js               # Recursive auto-attach
+│   ├── correlation-engine.js         # Forensic analysis + burst detection
+│   └── signature-db.js               # Library signature database
+├── reporters/
+│   └── report-generator.js           # JSON + HTML + CTX report output
+└── tests/
+    ├── test-regression.js            # 28 REG rules
+    └── test-injection.js             # Script content validation
 ```
 
-## Upgrade from v6.1/v6.2
+## Target Performance
 
-1. Delete `node_modules/` and `package-lock.json`
-2. Replace ALL files with v6.3
-3. `npm install`
-4. `npm test`
-5. Done — no `patch.exe`, no manual steps
+| Version | Events | Categories | Coverage |
+|---------|--------|------------|----------|
+| v6.1 (stealth) | 1,799 | 22 | 52.4% |
+| v6.4 (stealth) | 313 | 19 | 63.3%* |
+| **v7.0 (target)** | **1,800+** | **35+** | **83%+** |
+
+\* v6.4 redefined category basis to ~30 CDP-native categories
