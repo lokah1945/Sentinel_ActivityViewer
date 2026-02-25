@@ -1,45 +1,44 @@
 #!/usr/bin/env node
 /**
- * ╔══════════════════════════════════════════════════════════╗
- * ║   🛡️  SENTINEL v4.4.2 — ZERO BLIND SPOT FORENSIC CATCHER ║
- * ║   7-Layer Architecture | 37 Categories | 1H5W Framework   ║
- * ╚══════════════════════════════════════════════════════════╝
- * 
- * BASED ON v4.4.1 (WORKING — 1512 events captured)
- * 
- * v4.4.2 FIXES (surgical, non-breaking):
- *   FIX #1: Persistent context option (--persistent) to avoid incognito flag
- *   FIX #2: Anti-stuck [5/7] — parallel frame.evaluate with timeout
- *   FIX #3: Final flush before browser close (no event loss)
- *   FIX #4: Injection flags passed correctly to report generator
- *   FIX #5: Frame info with proper url/origin for coverage proof
- *   FIX #6: timeSpanMs fix in report generator (max ts, not last ts)
- *   FIX #7: CoverageProof fix (no null in unmonitored frames)
+ * ╔═══════════════════════════════════════════════════════════════╗
+ * ║   🛡️  SENTINEL v4.6.3 — GHOST PROTOCOL FORENSIC CATCHER       ║
+ * ║   Maximum Detection Recovery | 37+ Categories | 1H5W | Zero Spoof ║
+ * ╠═══════════════════════════════════════════════════════════════╣
+ * ║   v4.6.3 FIXES — Maximum Detection Recovery:                   ║
+ * ║   1. RESTORED frameattached handler (lost in v4.6.3)          ║
+ * ║   2. RESTORED framenavigated re-injection for late frames     ║
+ * ║   3. FIXED sub-frame collection: collect ALL with sentinel    ║
+ * ║   4. FIXED network category: dual-log to network+exfil       ║
+ * ║   5. FIXED push telemetry: 500ms + immediate boot push       ║
+ * ║   6. RESTORED suspicious event listeners (sec 27+38 merged)  ║
+ * ║   7. NEW: permissions, gamepad, CSS.supports hooks            ║
+ * ║   8. FIXED stealth-interceptor conflict (permissions hook)    ║
+ * ╚═══════════════════════════════════════════════════════════════╝
  *
  * Usage:
- *   node index.js <url>                    — Quick scan (stealth default)
- *   node index.js <url> --observe          — Observe mode (no stealth)
- *   node index.js <url> --dual-mode        — Run BOTH modes & compare
- *   node index.js <url> --no-headless      — Show browser window
- *   node index.js <url> --persistent       — Use persistent context (anti-incognito)
- *   node index.js <url> --profile-dir=PATH — Custom profile directory
- *   node index.js <url> --timeout=45000    — Custom timeout (ms)
- *   node index.js <url> --locale=en-US     — Override locale
- *   node index.js <url> --timezone=Asia/Jakarta — Override timezone
+ *   node index.js <url>                     — Quick scan
+ *   node index.js <url> --no-headless       — Show browser window
+ *   node index.js <url> --timeout=45000     — Custom timeout
+ *   node index.js <url> --dual-mode         — Run observe then stealth
+ *   node index.js <url> --observe           — No automation cleanup
+ *   node index.js <url> --verbose           — Debug info
+ *   node index.js <url> --locale=id-ID      — Override locale
  */
 
-const { createStealthPlugin, getExtraStealthScript } = require('./hooks/stealth-config');
+const { getExtraStealthScript } = require('./hooks/stealth-config');
 const { getAntiDetectionScript } = require('./hooks/anti-detection-shield');
 const { getInterceptorScript } = require('./hooks/api-interceptor');
 const { generateReport } = require('./reporters/report-generator');
+const { TargetGraph } = require('./lib/target-graph');
 const readline = require('readline');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
-// ── Parse CLI arguments ──
+// ── Parse CLI ──
 const args = process.argv.slice(2);
 const flags = {};
 let targetUrl = null;
-
 for (const arg of args) {
   if (arg.startsWith('--')) {
     const [key, val] = arg.slice(2).split('=');
@@ -50,12 +49,12 @@ for (const arg of args) {
 }
 
 const TIMEOUT = parseInt(flags.timeout) || 30000;
-const HEADLESS = flags['no-headless'] ? false : (flags.headless !== undefined ? flags.headless !== 'false' : true);
+const HEADLESS = flags['no-headless'] ? false : true;
 const DUAL_MODE = flags['dual-mode'] === true;
-const STEALTH_MODE = flags.observe ? false : true;
-const LOCALE = flags.locale || 'id';
-const TIMEZONE = flags.timezone || 'Asia/Jakarta';
-const PERSISTENT = flags['profile-dir'] || flags['persistent'] || '';
+const OBSERVE_ONLY = flags.observe === true;
+const VERBOSE = flags.verbose === true;
+const LOCALE = flags.locale || Intl.DateTimeFormat().resolvedOptions().locale || 'en-US';
+const TIMEZONE = flags.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Jakarta';
 
 function normalizeUrl(input) {
   input = input.trim();
@@ -68,57 +67,25 @@ async function prompt(question) {
   return new Promise(resolve => rl.question(question, answer => { rl.close(); resolve(answer.trim()); }));
 }
 
-/**
- * CDP Supplement — for push telemetry and iframe auto-attach
- * NOT used for primary injection (addInitScript handles that)
- */
-async function setupCDPSupplement(page) {
+function createTempProfile() {
+  const tmpBase = path.join(os.tmpdir(), 'sentinel-profiles');
+  if (!fs.existsSync(tmpBase)) fs.mkdirSync(tmpBase, { recursive: true });
+  const profileDir = path.join(tmpBase, `sentinel_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
+  fs.mkdirSync(profileDir, { recursive: true });
+  return profileDir;
+}
+
+function cleanupProfile(profileDir) {
   try {
-    const cdpSession = await page.context().newCDPSession(page);
-    const pushEvents = [];
-
-    try {
-      await cdpSession.send('Runtime.addBinding', { name: '__SENTINEL_PUSH__' });
-    } catch(e) {}
-
-    cdpSession.on('Runtime.bindingCalled', (params) => {
-      if (params.name === '__SENTINEL_PUSH__') {
-        try {
-          const data = JSON.parse(params.payload);
-          if (data.events) pushEvents.push(...data.events);
-        } catch(e) {}
-      }
-    });
-
-    // Auto-attach to iframes/workers for monitoring (L3)
-    try {
-      await cdpSession.send('Target.setAutoAttach', {
-        autoAttach: true,
-        waitForDebuggerOnStart: true,
-        flatten: true
-      });
-    } catch(e) {}
-
-    cdpSession.on('Target.attachedToTarget', async (event) => {
-      try {
-        if (event.targetInfo && (event.targetInfo.type === 'iframe' || event.targetInfo.type === 'worker' || event.targetInfo.type === 'service_worker')) {
-          try {
-            await cdpSession.send('Runtime.runIfWaitingForDebugger', {}, event.sessionId);
-          } catch(e) {}
-        }
-      } catch(e) {}
-    });
-
-    return { cdpSession, pushEvents };
+    if (profileDir && fs.existsSync(profileDir)) {
+      fs.rmSync(profileDir, { recursive: true, force: true });
+      if (VERBOSE) console.log(`  🗑️  Profile cleaned: ${path.basename(profileDir)}`);
+    }
   } catch(e) {
-    return { cdpSession: null, pushEvents: [] };
+    if (VERBOSE) console.warn(`  ⚠️  Profile cleanup failed: ${e.message}`);
   }
 }
 
-/**
- * Evaluate with timeout — prevents stuck on destroyed/cross-origin frames
- * FIX #2: Anti-stuck
- */
 async function evalWithTimeout(target, fn, ms) {
   ms = ms || 5000;
   return Promise.race([
@@ -127,404 +94,481 @@ async function evalWithTimeout(target, fn, ms) {
   ]);
 }
 
+/**
+ * v4.6.3: Network capture returns structured object compatible with report-generator
+ */
+function setupNetworkCapture(page) {
+  const requests = [];
+  const responses = [];
+  const pairs = [];
+  const pendingRequests = new Map();
+
+  page.on('request', (request) => {
+    try {
+      const url = request.url();
+      if (url.startsWith('data:')) return;
+      const entry = {
+        ts: Date.now(),
+        method: request.method(),
+        url: url.slice(0, 500),
+        resourceType: request.resourceType(),
+        requestHeaders: (() => {
+          try {
+            const h = request.headers();
+            const keep = {};
+            for (const k of ['user-agent', 'referer', 'origin', 'content-type',
+              'sec-ch-ua', 'sec-ch-ua-platform', 'sec-ch-ua-mobile']) {
+              if (h[k]) keep[k] = h[k].slice(0, 300);
+            }
+            return keep;
+          } catch(e) { return {}; }
+        })(),
+        postData: (() => {
+          try { return request.postData() ? request.postData().slice(0, 1000) : null; } catch(e) { return null; }
+        })()
+      };
+      requests.push(entry);
+      pendingRequests.set(url, entry);
+    } catch(e) {}
+  });
+
+  page.on('response', async (response) => {
+    try {
+      const url = response.url();
+      if (url.startsWith('data:')) return;
+      const rh = (() => {
+        try {
+          const h = response.headers();
+          const keep = {};
+          for (const k of ['content-type', 'content-length', 'cache-control',
+            'access-control-allow-origin', 'server']) {
+            if (h[k]) keep[k] = h[k].slice(0, 300);
+          }
+          return keep;
+        } catch(e) { return {}; }
+      })();
+      let bodyText = null, bodySize = 0;
+      try {
+        const ct = rh['content-type'] || '';
+        if (ct.match(/json|text|javascript|html|css|xml/i)) {
+          bodyText = await response.text().catch(() => null);
+          if (bodyText) bodySize = bodyText.length;
+        } else {
+          const body = await response.body().catch(() => null);
+          if (body) bodySize = body.length;
+        }
+      } catch(e) {}
+      responses.push({ ts: Date.now(), status: response.status(), url: url.slice(0, 500) });
+
+      const reqEntry = pendingRequests.get(url);
+      if (reqEntry) {
+        pairs.push({
+          url: url.slice(0, 500),
+          method: reqEntry.method,
+          resourceType: reqEntry.resourceType,
+          requestHeaders: reqEntry.requestHeaders,
+          postData: reqEntry.postData,
+          responseStatus: response.status(),
+          responseHeaders: rh,
+          responseBody: bodyText ? bodyText.slice(0, 2000) : null,
+          responseSize: bodySize,
+          ts: reqEntry.ts
+        });
+        pendingRequests.delete(url);
+      }
+    } catch(e) {}
+  });
+
+  return { requests: requests.length, responses: responses.length, pairs,
+    get requestCount() { return requests.length; },
+    get responseCount() { return responses.length; }
+  };
+}
+
+const OUTPUT_DIR = path.join(__dirname, 'output');
+
 async function runScan(url, options = {}) {
   const stealthEnabled = options.stealth !== false;
   const label = stealthEnabled ? '🥷 STEALTH' : '👁️ OBSERVE';
+  let profileDir = null;
 
   console.log(`\n${'═'.repeat(65)}`);
-  console.log(`  ${label} MODE — Sentinel v4.4.2 Zero Blind Spot`);
+  console.log(`  ${label} MODE — Sentinel v4.6.3 Ghost Protocol`);
   console.log(`  Target: ${url}`);
-  console.log(`  Timeout: ${TIMEOUT / 1000}s | Headless: ${HEADLESS} | Locale: ${LOCALE} | TZ: ${TIMEZONE}`);
-  console.log(`  Persistent: ${PERSISTENT ? 'Yes' : 'No (ephemeral)'}`);
+  console.log(`  Timeout: ${TIMEOUT / 1000}s | Headless: ${HEADLESS}`);
+  console.log(`  Locale: ${LOCALE} | TZ: ${TIMEZONE} | Persistent: true`);
   console.log(`${'═'.repeat(65)}\n`);
 
-  let browser, context, page, cdpData;
-  const injectionFlags = { L1_addInitScript: false, L2_stealthPlugin: false, L3_cdpSupplement: false, L4_perFrame: false };
+  let context, page, cdpSession, targetGraph, networkLog;
+  const injectionFlags = {
+    L1_addInitScript: false,
+    L2_automationCleanup: false,
+    L3_cdpSupplement: false,
+    L4_perFrame: false,
+    L5_recursiveAutoAttach: false,
+    L6_workerPipeline: false
+  };
 
   try {
-    // ══════════════════════════════════════
-    //  STEP 1: LAUNCH BROWSER
-    // ══════════════════════════════════════
+    // ══════ STEP 1: LAUNCH (PERSISTENT + GPU) ══════
+    console.log('[1/8] Launching browser...');
+    const { chromium } = require('playwright');
+
+    /**
+     * v4.6.3 KEY FIXES:
+     * --use-gl=desktop → Forces real GPU instead of SwiftShader
+     *   SwiftShader = "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device..." = BOT SIGNAL
+     *   Real GPU    = "ANGLE (NVIDIA, GeForce..." or "ANGLE (Intel, HD..." = HUMAN
+     * --enable-gpu → Ensures GPU process starts even in some CI environments
+     * ignoreDefaultArgs: ['--enable-automation'] → Removes Chrome automation bar
+     * NO userAgent override → UA matches sec-ch-ua naturally
+     */
     const launchArgs = [
       '--disable-blink-features=AutomationControlled',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-web-security',
+      '--use-gl=desktop',
+      '--enable-gpu',
       '--no-first-run',
       '--no-default-browser-check',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-background-timer-throttling',
     ];
 
-    const contextOptions = {
+    profileDir = createTempProfile();
+    context = await chromium.launchPersistentContext(profileDir, {
+      headless: HEADLESS,
+      args: launchArgs,
+      ignoreDefaultArgs: ['--enable-automation'],
       viewport: { width: 1920, height: 1080 },
       locale: LOCALE,
       timezoneId: TIMEZONE,
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       permissions: [],
       colorScheme: 'light',
-    };
+      // v4.6.3: NO userAgent override. Chromium's native UA = consistent with sec-ch-ua
+    });
+    page = context.pages()[0] || await context.newPage();
+    console.log('  ✅ Browser launched');
 
-    let chromium;
-
-    if (stealthEnabled) {
-      try {
-        const pe = require('playwright-extra');
-        chromium = pe.chromium;
-        const stealthPlugin = createStealthPlugin();
-        if (stealthPlugin) {
-          chromium.use(stealthPlugin);
-          injectionFlags.L2_stealthPlugin = true;
-          console.log('✅ Stealth plugin loaded');
-        }
-      } catch(e) {
-        chromium = require('playwright').chromium;
-      }
-    } else {
-      chromium = require('playwright').chromium;
-    }
-
-    // FIX #1: Persistent context option
-    if (PERSISTENT) {
-      const profileDir = typeof PERSISTENT === 'string' && PERSISTENT !== 'true'
-        ? path.resolve(PERSISTENT)
-        : path.join(__dirname, 'chrome_profile');
-
-      console.log(`  → Using persistent context: ${profileDir}`);
-      context = await chromium.launchPersistentContext(profileDir, {
-        headless: HEADLESS,
-        args: launchArgs,
-        ignoreDefaultArgs: ['--enable-automation'],
-        ...contextOptions
-      });
-      browser = null; // persistent context IS the browser
-      page = context.pages()[0] || await context.newPage();
-    } else {
-      browser = await chromium.launch({
-        headless: HEADLESS,
-        args: launchArgs
-      });
-      context = await browser.newContext(contextOptions);
-      page = await context.newPage();
-    }
-
-    // ══════════════════════════════════════
-    //  STEP 2: PRIMARY INJECTION via addInitScript
-    //  Order: shield → stealth → interceptor
-    //  UNCHANGED FROM v4.4.1 — this is the PROVEN working method
-    // ══════════════════════════════════════
-    console.log('[1/7] Injecting via addInitScript (PRIMARY — proven method)...');
-
-    // First: shield (sets window.__SENTINEL_SHIELD__)
-    await page.addInitScript(getAntiDetectionScript());
-
-    // Second: stealth patches (patches navigator/screen INSTANCE properties)
-    if (stealthEnabled) {
-      await page.addInitScript(getExtraStealthScript({
-        locale: LOCALE,
-        languages: LOCALE === 'id' ? "['id', 'en-US', 'en']" : "['en-US', 'en']",
-        platform: 'Win32',
-        hardwareConcurrency: 8,
-        deviceMemory: 8
-      }));
-      console.log('  ✅ Anti-detection shield + stealth patches injected');
-    } else {
-      console.log('  ✅ Anti-detection shield injected');
-    }
-
-    // Third: interceptor (uses smartHookGetter to wrap whatever is there)
-    await page.addInitScript(getInterceptorScript({
+    // ══════ STEP 2: INJECT HOOKS ══════
+    console.log('[2/8] Injecting monitoring scripts...');
+    const shieldScript = getAntiDetectionScript();
+    const stealthScript = stealthEnabled ? getExtraStealthScript() : '';
+    const interceptorScript = getInterceptorScript({
       timeout: TIMEOUT,
       stealthEnabled: stealthEnabled,
       stackSampleRate: 10
-    }));
-    injectionFlags.L1_addInitScript = true;
-    console.log('  ✅ API interceptor injected (37 categories, 200+ hooks)');
-
-    // ══════════════════════════════════════
-    //  STEP 3: CDP SUPPLEMENT
-    // ══════════════════════════════════════
-    console.log('[2/7] Setting up CDP supplement (telemetry + iframe monitor)...');
-    cdpData = await setupCDPSupplement(page);
-    if (cdpData.cdpSession) {
-      injectionFlags.L3_cdpSupplement = true;
-      console.log('  ✅ CDP push telemetry + auto-attach active');
-    }
-
-    // ══════════════════════════════════════
-    //  STEP 4: Per-frame injection for late-attached frames
-    // ══════════════════════════════════════
-    page.on('frameattached', async (frame) => {
-      try {
-        await frame.evaluate(getAntiDetectionScript() + ';\n' + 
-          getInterceptorScript({ timeout: TIMEOUT, stealthEnabled: stealthEnabled }));
-        injectionFlags.L4_perFrame = true;
-      } catch(e) { /* cross-origin — expected */ }
     });
 
-    // ══════════════════════════════════════
-    //  STEP 5: NAVIGATE TO TARGET
-    // ══════════════════════════════════════
-    console.log('[3/7] Navigating to target...');
+    await page.addInitScript(shieldScript);
+    if (stealthEnabled) {
+      await page.addInitScript(stealthScript);
+      injectionFlags.L2_automationCleanup = true;
+      console.log('  ✅ Anti-detection shield + stealth patches');
+    } else {
+      console.log('  ✅ Anti-detection shield (observe mode)');
+    }
+    await page.addInitScript(interceptorScript);
+    injectionFlags.L1_addInitScript = true;
+    console.log('  ✅ API interceptor (37 categories, 200+ hooks, push telemetry)');
+
+    // ══════ STEP 3: CDP + TARGET GRAPH ══════
+    console.log('[3/8] Setting up CDP supplement...');
+    cdpSession = await page.context().newCDPSession(page);
+    targetGraph = new TargetGraph({
+      verbose: VERBOSE,
+      injectionScript: shieldScript + ';\n' + stealthScript + ';\n' + interceptorScript,
+      shieldScript: shieldScript,
+      stealthScript: stealthScript
+    });
+    await targetGraph.initialize(cdpSession);
+    injectionFlags.L3_cdpSupplement = true;
+    injectionFlags.L5_recursiveAutoAttach = true;
+    networkLog = setupNetworkCapture(page);
+    console.log('  ✅ CDP telemetry + auto-attach + network monitor active');
+
+
+    // ══════ v4.6.3: FRAME HANDLERS (CRITICAL — restores event detection) ══════
+    // v4.6.2 REMOVED these handlers causing event drop from ~1512 to ~553!
+    // When BrowserScan creates late iframes (ads, sub-tests), they need hooks injected.
+    page.on('frameattached', async (frame) => {
+      try {
+        // Wait briefly for frame to initialize
+        await new Promise(r => setTimeout(r, 50));
+        const fUrl = frame.url() || '';
+        // v4.6.3: Inject into ALL frames including about:blank
+        // (BrowserScan uses blank iframes for sandboxed fingerprinting)
+        if (frame.isDetached()) return;
+        await frame.evaluate(shieldScript + ';\n' +
+          (stealthEnabled ? stealthScript + ';\n' : '') +
+          interceptorScript).catch(() => {});
+        injectionFlags.L4_perFrame = true;
+      } catch(e) {
+        // Frame may have been destroyed before we could inject
+      }
+    });
+
+    page.on('framenavigated', async (frame) => {
+      try {
+        if (frame === page.mainFrame()) return; // Don't re-inject main frame
+        if (frame.isDetached()) return;
+        // Check if this frame already has sentinel
+        const hasData = await frame.evaluate(() => !!(window.__SENTINEL_DATA__)).catch(() => false);
+        if (!hasData) {
+          await frame.evaluate(shieldScript + ';\n' +
+            (stealthEnabled ? stealthScript + ';\n' : '') +
+            interceptorScript).catch(() => {});
+          injectionFlags.L4_perFrame = true;
+        }
+      } catch(e) {}
+    });
+
+    // ══════ STEP 4: NAVIGATE ══════
+    console.log('[4/8] Navigating to target...');
+    const navStart = Date.now();
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
     } catch(e) {
-      await page.goto(url, { waitUntil: 'commit', timeout: TIMEOUT * 2 });
+      if (e.message.includes('net::')) throw e;
     }
-    console.log(`  🌐 Page loaded: ${page.url()}`);
+    console.log(`  🌐 Page loaded in ${((Date.now()-navStart)/1000).toFixed(1)}s: ${page.url()}`);
 
-    // ══════════════════════════════════════
-    //  STEP 6: DIAGNOSTIC CHECK
-    // ══════════════════════════════════════
-    try {
-      const active = await page.evaluate(() => !!window.__SENTINEL_ACTIVE__);
-      const bootOk = await page.evaluate(() => window.__SENTINEL_DATA__ ? window.__SENTINEL_DATA__.bootOk : false);
-      const shieldOk = await page.evaluate(() => !!window.__SENTINEL_SHIELD__);
-      console.log(`  🔍 Diagnostic: ACTIVE=${active} | BOOT_OK=${bootOk} | SHIELD=${shieldOk}`);
-      if (!active) {
-        console.error('  🔴 CRITICAL: Injection failed! Trying emergency re-injection...');
-        await page.evaluate(getAntiDetectionScript() + ';\n' +
-          getInterceptorScript({ timeout: TIMEOUT, stealthEnabled }));
+    // Per-frame injection
+    const existingFrames = page.frames();
+    for (let i = 1; i < existingFrames.length; i++) {
+      const fUrl = existingFrames[i].url() || '';
+      if (fUrl.startsWith('http') || fUrl === 'about:srcdoc' || (fUrl === 'about:blank' && existingFrames[i].name())) {
+        try {
+          await existingFrames[i].evaluate(shieldScript + ';\n' + (stealthEnabled ? stealthScript + ';\n' : '') + interceptorScript);
+          injectionFlags.L4_perFrame = true;
+        } catch(e) {}
       }
-    } catch(e) { console.warn('  ⚠️ Diagnostic check failed:', e.message); }
-
-    // ══════════════════════════════════════
-    //  STEP 7: OBSERVE ACTIVITY (with adaptive timeout)
-    //  UNCHANGED FROM v4.4.1 — proven working
-    // ══════════════════════════════════════
-    console.log('[4/7] Observing activity...');
-    const observeTime = Math.max(TIMEOUT - 5000, 10000);
-
-    // Scroll to trigger lazy-loaded scripts
-    await page.waitForTimeout(Math.floor(observeTime * 0.4));
-    try { await page.evaluate(() => { window.scrollTo(0, document.body.scrollHeight / 2); }); } catch(e) {}
-    await page.waitForTimeout(2000);
-    try { await page.evaluate(() => { window.scrollTo(0, document.body.scrollHeight); }); } catch(e) {}
-    await page.waitForTimeout(2000);
-    try { await page.evaluate(() => { window.scrollTo(0, 0); }); } catch(e) {}
-
-    // Wait remaining time
-    const remaining = observeTime - Math.floor(observeTime * 0.4) - 4000;
-    if (remaining > 0) await page.waitForTimeout(remaining);
-
-    const midCount = await page.evaluate(() => {
-      return window.__SENTINEL_DATA__ ? window.__SENTINEL_DATA__.events.length : 0;
-    }).catch(() => 0);
-    console.log(`  📊 Mid-scan events: ${midCount}`);
-
-    // Adaptive: if events are low, wait longer
-    if (midCount < 50) {
-      const extraWait = Math.min(TIMEOUT, 15000);
-      await page.waitForTimeout(extraWait);
-      const lateCount = await page.evaluate(() => {
-        return window.__SENTINEL_DATA__ ? window.__SENTINEL_DATA__.events.length : 0;
-      }).catch(() => 0);
-      if (lateCount > midCount) console.log(`  📊 Late events detected: ${lateCount}`);
     }
 
-    // ══════════════════════════════════════
-    //  STEP 8: COLLECT DATA — FIX #2: anti-stuck + FIX #3: final flush
-    // ══════════════════════════════════════
-    console.log('[5/7] Collecting forensic data...');
-
-    // FIX #3: Final flush — trigger push of remaining events
+    // Diagnostic
     try {
-      await page.evaluate(() => {
-        if (typeof window.__SENTINEL_PUSH__ === 'function' && window.__SENTINEL_DATA__) {
-          try {
-            window.__SENTINEL_PUSH__(JSON.stringify({
-              type: 'final_flush',
-              frameId: window.__SENTINEL_DATA__.frameId || '',
-              events: window.__SENTINEL_DATA__.events.slice(-100)
-            }));
-          } catch(e) {}
-        }
-      });
-      await page.waitForTimeout(500); // grace period for push to arrive
+      const active = await page.evaluate(() => !!(window.__SENTINEL_DATA__ || Object.getOwnPropertyNames(window).some(k => k.indexOf('_s') === 0))).catch(() => false);
+      const bootOk = await page.evaluate(() => window.__SENTINEL_DATA__ ? window.__SENTINEL_DATA__.bootOk : false).catch(() => false);
+      const shieldOk = await page.evaluate(() => !!window.__SENTINEL_SHIELD__).catch(() => false);
+      console.log(`  🔍 Diagnostic: ACTIVE=${active} | BOOT=${bootOk} | SHIELD=${shieldOk}`);
+      if (!active) {
+        console.error('  🔴 Emergency re-inject...');
+        await page.evaluate(shieldScript + ';\n' + (stealthEnabled ? stealthScript + ';\n' : '') + interceptorScript);
+      }
     } catch(e) {}
 
-    // Primary: get from top frame (with timeout protection)
+    // ══════ STEP 5: OBSERVE ══════
+    console.log('[5/8] Monitoring fingerprinting activity...');
+    const observeTime = Math.max(TIMEOUT - 5000, 10000);
+    await page.waitForTimeout(Math.floor(observeTime * 0.35));
+    try { await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight / 3)); } catch(e) {}
+    await page.waitForTimeout(1500);
+    try { await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.6)); } catch(e) {}
+    await page.waitForTimeout(1500);
+    try { await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)); } catch(e) {}
+    await page.waitForTimeout(1500);
+    try { await page.evaluate(() => window.scrollTo(0, 0)); } catch(e) {}
+    const rem = observeTime - Math.floor(observeTime * 0.35) - 4500;
+    if (rem > 0) await page.waitForTimeout(rem);
+
+    const midCount = await page.evaluate(() => {
+      try { return window.__SENTINEL_DATA__ ? window.__SENTINEL_DATA__.events.length : 0; } catch(e) { return 0; }
+    }).catch(() => 0);
+    console.log(`  📊 Events after ${(observeTime/1000).toFixed(0)}s wait: ${midCount}`);
+    if (midCount < 50) await page.waitForTimeout(Math.min(TIMEOUT, 15000));
+
+    // ══════ STEP 6: WORKER EVENTS ══════
+    console.log('[6/8] Collecting worker events...');
+    let workerEvents = [];
+    try {
+      workerEvents = await targetGraph.collectWorkerEvents(cdpSession);
+      if (workerEvents.length > 0) injectionFlags.L6_workerPipeline = true;
+    } catch(e) {}
+    console.log(`  📦 Worker events: ${workerEvents.length}`);
+
+    // ══════ STEP 7: COLLECT FORENSIC DATA ══════
+    console.log('[7/8] Collecting forensic data...');
+
+    // Final flush
+    try {
+      await page.evaluate(() => {
+        var pushFn = typeof window.__SENTINEL_PUSH__ === 'function' ? window.__SENTINEL_PUSH__ :
+                     typeof window.__s46push__ === 'function' ? window.__s46push__ : null;
+        if (pushFn && window.__SENTINEL_DATA__) {
+          try { pushFn(JSON.stringify({ type:'final_flush', frameId: window.__SENTINEL_DATA__.frameId||'', events: window.__SENTINEL_DATA__.events.slice(-100) })); } catch(e) {}
+        }
+      });
+      await page.waitForTimeout(500);
+    } catch(e) {}
+
     let sentinelData;
     try {
       sentinelData = await evalWithTimeout(page, () => {
-        if (window.__SENTINEL_DATA__) {
-          return {
-            events: window.__SENTINEL_DATA__.events || [],
-            bootOk: window.__SENTINEL_DATA__.bootOk || false,
-            frameId: window.__SENTINEL_DATA__.frameId || ''
-          };
-        }
-        if (typeof window.__SENTINEL_FLUSH__ === 'function') {
-          var flushed = JSON.parse(window.__SENTINEL_FLUSH__());
-          return { events: flushed.events || [], bootOk: true, frameId: 'flushed' };
-        }
-        return { events: [], bootOk: false, frameId: 'none' };
+        if (window.__SENTINEL_DATA__) return { events: window.__SENTINEL_DATA__.events||[], bootOk: window.__SENTINEL_DATA__.bootOk||false, frameId: window.__SENTINEL_DATA__.frameId||'', dedupCount: window.__SENTINEL_DATA__.dedupCount||0 };
+        if (typeof window.__SENTINEL_FLUSH__ === 'function') { var fl=JSON.parse(window.__SENTINEL_FLUSH__()); return { events:fl.events||[], bootOk:true, frameId:'flushed', dedupCount:0 }; }
+        return { events:[], bootOk:false, frameId:'none', dedupCount:0 };
       }, 8000);
     } catch(e) {
-      console.warn(`  ⚠️ Main frame collection timeout: ${e.message}`);
-      sentinelData = { events: [], bootOk: false, frameId: 'error' };
+      console.warn(`  ⚠️ Main frame timeout: ${e.message}`);
+      sentinelData = { events:[], bootOk:false, frameId:'error', dedupCount:0 };
     }
-    console.log(`  📦 Main frame: ${sentinelData.events.length} events`);
+    console.log(`  📦 Main frame: ${sentinelData.events.length} events (boot=${sentinelData.bootOk})`);
 
-    // FIX #2: Collect from iframes — parallel with timeout, skip blank frames
+    // Sub-frames
     const frames = page.frames();
     const framePromises = [];
     const frameInfoList = [];
-
     for (let i = 0; i < frames.length; i++) {
       const f = frames[i];
       const fUrl = f.url() || '';
       let fOrigin = null;
-      try {
-        if (fUrl.startsWith('http')) fOrigin = new URL(fUrl).origin;
-      } catch(e) {}
-      frameInfoList.push({ type: 'frame', url: fUrl, origin: fOrigin, name: f.name() || '' });
-
-      // Skip main frame (already collected), blank/empty frames
-      if (i === 0) continue;
-      if (!fUrl || fUrl === 'about:blank' || !fUrl.startsWith('http')) continue;
-
-      framePromises.push(
-        evalWithTimeout(f, () => {
-          if (window.__SENTINEL_DATA__) {
-            return {
-              events: window.__SENTINEL_DATA__.events || [],
-              bootOk: window.__SENTINEL_DATA__.bootOk || false,
-              frameId: window.__SENTINEL_DATA__.frameId || '',
-              origin: location.origin
-            };
-          }
-          if (typeof window.__SENTINEL_FLUSH__ === 'function') {
-            var fl = JSON.parse(window.__SENTINEL_FLUSH__());
-            return { events: fl.events || [], bootOk: true, frameId: 'iframe-flushed', origin: location.origin };
-          }
-          return null;
-        }, 3000).catch(e => null) // silently handle cross-origin/destroyed frames
-      );
+      try { if (fUrl.startsWith('http')) fOrigin = new URL(fUrl).origin; } catch(e) {}
+      frameInfoList.push({ type:'frame', url:fUrl, origin:fOrigin, name:f.name()||'', index:i });
+      if (i===0) continue;
+      const shouldCollect = (() => {
+        // v4.6.3: Collect from ALL frames — about:blank frames often run fingerprinting
+        if (fUrl.startsWith('http')) return true;
+        if (fUrl === 'about:srcdoc') return true;
+        if (fUrl === 'about:blank' || !fUrl) {
+          // v4.6.3: Always TRY to collect (was too restrictive in v4.6.2)
+          // We injected hooks into blank frames via frameattached, so they may have data
+          return true;
+        }
+        return true; // v4.6.3: Try everything, evalWithTimeout will handle failures
+      })();
+      if (!shouldCollect) continue;
+      framePromises.push(evalWithTimeout(f, () => {
+        if (window.__SENTINEL_DATA__) return { events:window.__SENTINEL_DATA__.events||[], bootOk:window.__SENTINEL_DATA__.bootOk||false, frameId:window.__SENTINEL_DATA__.frameId||'' };
+        if (typeof window.__SENTINEL_FLUSH__==='function') { var fl=JSON.parse(window.__SENTINEL_FLUSH__()); return { events:fl.events||[], bootOk:true, frameId:'flushed' }; }
+        return null;
+      }, 3000).catch(() => null));
     }
 
-    // Parallel collection (FIX #2: anti-stuck)
+    let subFrameEvents = 0;
     if (framePromises.length > 0) {
       const results = await Promise.allSettled(framePromises);
       for (const r of results) {
-        if (r.status === 'fulfilled' && r.value && r.value.events && r.value.events.length > 0) {
+        if (r.status==='fulfilled' && r.value && r.value.events && r.value.events.length>0) {
           sentinelData.events = sentinelData.events.concat(r.value.events);
-        }
-      }
-    }
-    console.log(`  📦 Total frames: ${frames.length} (${framePromises.length} sub-frames checked)`);
-
-    // Merge CDP push events
-    if (cdpData && cdpData.pushEvents.length > 0) {
-      console.log(`  📡 Push telemetry: ${cdpData.pushEvents.length} additional events from CDP`);
-      const existingTs = new Set(sentinelData.events.map(e => e.ts + ':' + e.api));
-      for (const pe of cdpData.pushEvents) {
-        const key = pe.ts + ':' + pe.api;
-        if (!existingTs.has(key)) {
-          sentinelData.events.push(pe);
-          existingTs.add(key);
+          subFrameEvents += r.value.events.length;
         }
       }
     }
 
-    console.log(`  📦 Grand total: ${sentinelData.events.length} events`);
+    // Merge CDP push
+    if (targetGraph.events.length > 0) {
+      const existingTs = new Set(sentinelData.events.map(e => e.ts+':'+e.api));
+      let merged = 0;
+      for (const pe of targetGraph.events) {
+        if (!existingTs.has(pe.ts+':'+pe.api)) { sentinelData.events.push(pe); merged++; }
+      }
+      console.log(`  📡 CDP push events: ${merged} new`);
+    }
 
-    // FIX #5: Build context map with proper url/origin
-    const pageCtxMap = await page.evaluate(() => window.__SENTINEL_CONTEXT_MAP__ || []).catch(() => []);
-    const fullContextMap = [...(pageCtxMap || []), ...frameInfoList];
+    // Merge workers
+    if (workerEvents.length > 0) {
+      for (const we of workerEvents) {
+        sentinelData.events.push({ ts:we.ts, cat:'worker', api:we.api, detail:JSON.stringify({url:we.url,type:we.workerType}).slice(0,500), risk:'high', dir:'call', origin:we.workerUrl||'worker', frame:'worker:'+(we.targetId||'').slice(0,8) });
+      }
+    }
 
-    console.log(`[6/7] Generating forensic report...`);
+    const pageCtxMap = await page.evaluate(() => window.__SENTINEL_CONTEXT_MAP__||[]).catch(() => []);
+    const fullContextMap = [...(pageCtxMap||[]), ...frameInfoList];
+    const targetInventory = targetGraph.getInventory();
+    const targetSummary = targetGraph.getSummary();
 
-    // ══════════════════════════════════════
-    //  STEP 9: GENERATE REPORT — FIX #4: pass injection flags
-    // ══════════════════════════════════════
+    // v4.6.3: Grand total logging (restored from v4.6.1)
+    const totalApiEvents = sentinelData.events.length;
+    const totalNetworkPairs = networkLog.pairs ? networkLog.pairs.length : 0;
+    console.log(`  📦 Grand total: ${totalApiEvents} API events + ${totalNetworkPairs} network pairs + ${workerEvents.length} worker events`);
+
+        // ══════ STEP 8: REPORT ══════
+    console.log('[8/8] Generating forensic report...');
+
     const reportResult = generateReport(sentinelData, fullContextMap, url, {
       stealthEnabled,
       prefix: `sentinel_${stealthEnabled ? 'stealth' : 'observe'}_${Date.now()}`,
-      injectionFlags: injectionFlags,  // FIX #4: pass real flags
-      frameInfo: frameInfoList         // FIX #5: pass proper frame info
+      injectionFlags,
+      frameInfo: frameInfoList,
+      networkLog: networkLog,
+      workerEvents: workerEvents,
+      targetInventory: targetInventory,
+      targetSummary: targetSummary
     });
 
     const r = reportResult.reportJson;
-
-    console.log(`Reports saved:`);
+    console.log(`\nReports saved:`);
     console.log(`   JSON: ${reportResult.jsonPath}`);
     console.log(`   HTML: ${reportResult.htmlPath}`);
     console.log(`   CTX:  ${reportResult.ctxPath}`);
 
     console.log('');
     console.log('┌─────────────────────────────────────────────────┐');
-    console.log(`│  🛡️ SENTINEL v4.4.2 FORENSIC SUMMARY               │`);
+    console.log(`│  🛡️ SENTINEL v4.6.3 FORENSIC SUMMARY             │`);
     console.log('├─────────────────────────────────────────────────┤');
-    console.log(`│  Events:     ${String(r.totalEvents).padEnd(8)} (from ${r.coverageProof?.totalFramesDetected || '?'} frames)`);
+    console.log(`│  Mode:       ${stealthEnabled?'STEALTH':'OBSERVE'}`);
+    console.log(`│  Events:     ${String(r.totalEvents).padEnd(8)} (from ${frameInfoList.length} frames)`);
     console.log(`│  Risk Score: ${r.riskScore}/100 ${r.riskLevel}`);
-    console.log(`│  Threats:    ${r.threats?.length || 0}`);
+    console.log(`│  Threats:    ${r.threats?.length||0}`);
     console.log(`│  Categories: ${r.categoriesDetected}/${r.categoriesMonitored}`);
-    console.log(`│  Duration:   ${(r.timeSpanMs / 1000).toFixed(1)}s`);
     console.log(`│  Coverage:   ${r.coveragePercent}%`);
+    console.log(`│  Duration:   ${(r.timeSpanMs/1000).toFixed(1)}s`);
     console.log('├─────────────────────────────────────────────────┤');
-    console.log(`│  Injection: L1=${injectionFlags.L1_addInitScript} L2=${injectionFlags.L2_stealthPlugin} L3=${injectionFlags.L3_cdpSupplement} L4=${injectionFlags.L4_perFrame}`);
+    console.log(`│  Injection Layers:`);
+    console.log(`│    L1 addInitScript:    ${injectionFlags.L1_addInitScript}`);
+    console.log(`│    L2 automationCleanup:${injectionFlags.L2_automationCleanup}`);
+    console.log(`│    L3 CDP supplement:   ${injectionFlags.L3_cdpSupplement}`);
+    console.log(`│    L4 per-frame:        ${injectionFlags.L4_perFrame}`);
+    console.log(`│    L5 recursive attach: ${injectionFlags.L5_recursiveAutoAttach}`);
+    console.log(`│    L6 worker pipeline:  ${injectionFlags.L6_workerPipeline}`);
+    console.log('├─────────────────────────────────────────────────┤');
+    console.log(`│  Persistent: true | GPU: desktop | Spoofing: NONE`);
     console.log('├─────────────────────────────────────────────────┤');
     console.log(`│  JSON: ${reportResult.jsonPath}`);
     console.log(`│  HTML: ${reportResult.htmlPath}`);
-    console.log(`│  CTX:  ${reportResult.ctxPath}`);
     console.log('└─────────────────────────────────────────────────┘');
 
-    // Cleanup
-    try {
-      if (cdpData && cdpData.cdpSession) await cdpData.cdpSession.detach().catch(() => {});
-    } catch(e) {}
-
-    if (browser) await browser.close();
-    else if (context) await context.close();
-
+    try { if (cdpSession) await cdpSession.detach().catch(()=>{}); } catch(e) {}
+    await context.close();
+    cleanupProfile(profileDir);
+    profileDir = null;
     return reportResult;
 
   } catch(e) {
     console.error(`\n🔴 Scan failed: ${e.message}`);
-    try {
-      if (browser) await browser.close().catch(() => {});
-      else if (context) await context.close().catch(() => {});
-    } catch(ex) {}
+    if (VERBOSE) console.error(e.stack);
+    try { if (context) await context.close().catch(()=>{}); } catch(ex) {}
+    if (profileDir) cleanupProfile(profileDir);
     return null;
   }
 }
 
-// ── Main ──
 async function main() {
   console.log('');
-  console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║   🛡️  SENTINEL v4.4.2 — ZERO BLIND SPOT FORENSIC CATCHER ║');
-  console.log('║   Based on v4.4.1 | Surgical Fixes | 1H5W Framework      ║');
-  console.log('╚══════════════════════════════════════════════════════════╝');
+  console.log('╔══════════════════════════════════════════════════════════════════╗');
+  console.log('║   🛡️  SENTINEL v4.6.3 — GHOST PROTOCOL FORENSIC CATCHER         ║');
+  console.log('║   Maximum Detection Recovery | 37+ Categories | 1H5W | Zero Spoof   ║');
+  console.log('╚══════════════════════════════════════════════════════════════════╝');
 
-  if (!targetUrl) {
-    targetUrl = await prompt('\n🔍 Enter URL to scan: ');
-  }
-
-  if (!targetUrl) {
-    console.log('❌ No URL provided. Exiting.');
-    process.exit(1);
-  }
-
+  if (!targetUrl) targetUrl = await prompt('\n🔍 Enter URL to scan: ');
+  if (!targetUrl) { console.log('❌ No URL provided.'); process.exit(1); }
   targetUrl = normalizeUrl(targetUrl);
 
   if (DUAL_MODE) {
     console.log('\n🔄 DUAL MODE: Running both observe and stealth scans...\n');
     const observeResult = await runScan(targetUrl, { stealth: false });
     const stealthResult = await runScan(targetUrl, { stealth: true });
-
     if (observeResult && stealthResult) {
-      const oEvents = observeResult.reportJson.totalEvents;
-      const sEvents = stealthResult.reportJson.totalEvents;
+      const o = observeResult.reportJson, s = stealthResult.reportJson;
       console.log('\n╔═══════════════════════════════════╗');
       console.log('║  📊 DUAL MODE COMPARISON           ║');
       console.log('╠═══════════════════════════════════╣');
-      console.log(`║  Observe: ${oEvents} events, risk ${observeResult.reportJson.riskScore}/100`);
-      console.log(`║  Stealth: ${sEvents} events, risk ${stealthResult.reportJson.riskScore}/100`);
-      console.log(`║  Delta:   ${Math.abs(oEvents - sEvents)} events difference`);
-      console.log(`║  Duration: O=${(observeResult.reportJson.timeSpanMs/1000).toFixed(1)}s S=${(stealthResult.reportJson.timeSpanMs/1000).toFixed(1)}s`);
+      console.log(`║  Observe: ${o.totalEvents} events, risk ${o.riskScore}/100`);
+      console.log(`║  Stealth: ${s.totalEvents} events, risk ${s.riskScore}/100`);
+      console.log(`║  Delta:   ${Math.abs(o.totalEvents - s.totalEvents)} events`);
       console.log('╚═══════════════════════════════════╝');
     }
   } else {
-    await runScan(targetUrl, { stealth: STEALTH_MODE });
+    await runScan(targetUrl, { stealth: !OBSERVE_ONLY });
   }
 }
 

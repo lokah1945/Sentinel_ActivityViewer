@@ -1,5 +1,5 @@
 /**
- * Sentinel v4.4.2 — Forensic API Interceptor (CRITICAL FIX)
+ * Sentinel v4.6.3 — Forensic API Interceptor (CRITICAL FIX)
  * 
  * ROOT CAUSE OF v4.4 FAILURE (3-4 events instead of 786):
  *   v4.4 hooked Navigator.prototype getters, but stealth-config.js patches
@@ -36,8 +36,10 @@ function getInterceptorScript(config) {
     'use strict';
 
     // ── Guard: prevent double-injection ──
-    if (window.__SENTINEL_ACTIVE__) return;
-    window.__SENTINEL_ACTIVE__ = true;
+    // QUIET MODE: use non-obvious internal marker
+    var _qk = '_s' + Math.random().toString(36).substr(2,4);
+    if (window[_qk]) return;
+    window[_qk] = true;
 
     // ── Store REAL natives before anything else ──
     var _realGetDesc = Object.getOwnPropertyDescriptor;
@@ -69,13 +71,14 @@ function getInterceptorScript(config) {
         ts: Date.now() - _sentinel.startTime,
         cat: category,
         api: api,
-        detail: (typeof detail === 'object') ? JSON.stringify(detail).slice(0, 300) : String(detail || '').slice(0, 300),
+        detail: (typeof detail === 'object') ? JSON.stringify(detail).slice(0, 500) : String(detail || '').slice(0, 500),
         risk: risk || 'low',
+        dir: opts.returnValue !== undefined ? 'response' : 'call',
         origin: (function() { try { return location.origin; } catch(e) { return 'unknown'; } })(),
         frame: _sentinel.frameId
       };
       if (opts.returnValue !== undefined) {
-        try { event.value = JSON.stringify(opts.returnValue).slice(0, 200); } catch(e) { event.value = String(opts.returnValue).slice(0, 200); }
+        try { event.value = JSON.stringify(opts.returnValue).slice(0, 500); } catch(e) { event.value = String(opts.returnValue).slice(0, 500); }
       }
       if (opts.why) event.why = opts.why;
       try {
@@ -837,22 +840,10 @@ function getInterceptorScript(config) {
       });
     } catch(e) {}
 
-    // ═══ 27. EVENT LISTENERS (suspicious patterns) ═══
-    try {
-      var _origAddEvt = window.addEventListener;
-      window.addEventListener = function() {
-        var type = arguments[0];
-        if (['devicemotion', 'deviceorientation', 'deviceorientationabsolute',
-             'touchstart', 'touchmove', 'touchend',
-             'pointerdown', 'pointermove', 'pointerup'].indexOf(type) >= 0) {
-          log('sensor-apis', 'addEventListener', { event: type }, 'medium', {
-            why: 'Sensor event listener — device motion/orientation fingerprint'
-          });
-        }
-        return _origAddEvt.apply(this, arguments);
-      };
-      try { window.addEventListener.toString = function() { return 'function addEventListener() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
+    // ═══ 27. EVENT LISTENERS (suspicious patterns — v4.6.3 RESTORED + EXPANDED) ═══
+    // v4.6.3: Restored from v4.4.1 + expanded. Section 38 only handled message+sensor,
+    // but missed focus/blur/visibilitychange/resize which are used for behavioral fingerprinting
+    // NOTE: This is now merged INTO section 38 below (EventTarget.prototype.addEventListener)
 
     // ═══ 28. INTERSECTION/MUTATION OBSERVERS ═══
     try {
@@ -940,8 +931,23 @@ function getInterceptorScript(config) {
       try { window.requestAnimationFrame.toString = function() { return 'function requestAnimationFrame() { [native code] }'; }; } catch(e) {}
     } catch(e) {}
 
-    // ═══ DUAL EXPORT: __SENTINEL_DATA__ (direct) + __SENTINEL_FLUSH__ (serialized) ═══
-    window.__SENTINEL_DATA__ = _sentinel;
+    // ═══ v4.6 QUIET MODE EXPORT ═══
+    // Non-enumerable: Object.keys(window) won't reveal sentinel
+    try {
+      Object.defineProperty(window, '__SENTINEL_DATA__', {
+        get: function() { return _sentinel; },
+        configurable: true,
+        enumerable: false
+      });
+      Object.defineProperty(window, '__SENTINEL_ACTIVE__', {
+        get: function() { return true; },
+        configurable: true,
+        enumerable: false
+      });
+    } catch(e) {
+      // Fallback for restricted contexts
+      window.__SENTINEL_DATA__ = _sentinel;
+    }
 
     window.__SENTINEL_FLUSH__ = function() {
       return JSON.stringify({
@@ -963,15 +969,273 @@ function getInterceptorScript(config) {
       timestamp: Date.now()
     }];
 
-    // ═══ PUSH TELEMETRY ═══
-    if (typeof window.__SENTINEL_PUSH__ === 'function') {
+
+    // ═══ 34. BLOB/DATA URL MONITORING (v4.6 NEW) ═══
+    try {
+      var _origCreateObjectURL = URL.createObjectURL;
+      if (_origCreateObjectURL) {
+        URL.createObjectURL = function(obj) {
+          var result = _origCreateObjectURL.apply(URL, arguments);
+          var detail = { type: 'unknown', size: 0 };
+          try {
+            if (obj instanceof Blob) {
+              detail.type = obj.type || 'unknown';
+              detail.size = obj.size || 0;
+              // Flag suspicious: JS/HTML blobs could be script injection
+              if (obj.type && obj.type.match(/javascript|html|text.plain/i)) {
+                detail.suspicious = true;
+              }
+            }
+          } catch(e) {}
+          log('dom-probe', 'URL.createObjectURL', detail,
+            detail.suspicious ? 'high' : 'medium',
+            { returnValue: result ? result.slice(0, 100) : null, why: 'Blob URL creation — potential script isolation for fingerprinting bypass' });
+          return result;
+        };
+        try { URL.createObjectURL.toString = function() { return 'function createObjectURL() { [native code] }'; }; } catch(e) {}
+      }
+    } catch(e) {}
+
+    // ═══ 35. SHAREDARRAYBUFFER MONITORING (v4.6 NEW) ═══
+    try {
+      if (typeof SharedArrayBuffer !== 'undefined') {
+        var _OrigSAB = SharedArrayBuffer;
+        window.SharedArrayBuffer = function(length) {
+          log('hardware', 'new SharedArrayBuffer', { byteLength: length }, 'critical', {
+            why: 'SharedArrayBuffer — enables sub-microsecond timing attacks for hardware fingerprinting'
+          });
+          return new _OrigSAB(length);
+        };
+        window.SharedArrayBuffer.prototype = _OrigSAB.prototype;
+        try { window.SharedArrayBuffer.toString = function() { return 'function SharedArrayBuffer() { [native code] }'; }; } catch(e) {}
+      }
+    } catch(e) {}
+
+    // ═══ 36. PERFORMANCE.NOW PRECISION LOGGING (v4.6 NEW) ═══
+    try {
+      var _origPerfNow = Performance.prototype.now;
+      var _perfNowCount = 0;
+      if (_shield) {
+        _shield.hookFunction(Performance.prototype, 'now', function(original) {
+          var result = original.call(this);
+          _perfNowCount++;
+          // Only log periodically to avoid noise (timing APIs called thousands of times)
+          if (_perfNowCount <= 5 || _perfNowCount % 200 === 0) {
+            log('perf-timing', 'performance.now', { callCount: _perfNowCount }, 'medium', {
+              returnValue: result,
+              why: 'performance.now — high-res timer used for timing attacks'
+            });
+          }
+          return result;
+        });
+      }
+    } catch(e) {}
+
+    // ═══ 37. POSTMESSAGE MONITORING (v4.6 NEW — cross-frame communication) ═══
+    try {
+      var _origPostMessage = window.postMessage;
+      window.postMessage = function(message, targetOrigin) {
+        var detail = { targetOrigin: targetOrigin || '*' };
+        try {
+          if (typeof message === 'string') detail.preview = message.slice(0, 200);
+          else if (typeof message === 'object') detail.preview = JSON.stringify(message).slice(0, 200);
+        } catch(e) { detail.preview = '[complex]'; }
+        log('exfiltration', 'postMessage', detail, 'high', {
+          why: 'Cross-frame postMessage — potential distributed fingerprinting coordination'
+        });
+        return _origPostMessage.apply(this, arguments);
+      };
+      try { window.postMessage.toString = function() { return 'function postMessage() { [native code] }'; }; } catch(e) {}
+    } catch(e) {}
+
+    // ═══ 38. EVENT LISTENER MONITOR (v4.6.3: UNIFIED section 27+38 — ALL suspicious events) ═══
+    try {
+      var _origAddEventListener = EventTarget.prototype.addEventListener;
+      var _msgListenerCount = 0;
+      var _suspiciousEvents = {
+        'focus': { cat: 'system', risk: 'medium', why: 'Focus event — tab visibility fingerprinting' },
+        'blur': { cat: 'system', risk: 'medium', why: 'Blur event — tab visibility fingerprinting' },
+        'visibilitychange': { cat: 'system', risk: 'high', why: 'Visibility change — anti-analysis detection' },
+        'resize': { cat: 'screen', risk: 'low', why: 'Resize event — viewport monitoring' },
+        'pagehide': { cat: 'system', risk: 'medium', why: 'Page hide — navigation fingerprinting' },
+        'pageshow': { cat: 'system', risk: 'medium', why: 'Page show — cache/navigation fingerprinting' },
+        'beforeunload': { cat: 'system', risk: 'medium', why: 'Before unload — exit monitoring' }
+      };
+      var _sensorEvents = {
+        'devicemotion': 'high', 'deviceorientation': 'high', 'deviceorientationabsolute': 'high',
+        'touchstart': 'medium', 'touchmove': 'low', 'touchend': 'low',
+        'pointerdown': 'medium', 'pointermove': 'low', 'pointerup': 'low'
+      };
+      EventTarget.prototype.addEventListener = function(type, listener, options) {
+        // Cross-frame message monitoring
+        if (type === 'message' && this === window) {
+          _msgListenerCount++;
+          log('exfiltration', 'addEventListener:message', { listenerCount: _msgListenerCount }, 'medium', {
+            why: 'Window message listener — receiving cross-frame fingerprint data'
+          });
+        }
+        // Sensor event detection (unified from v4.4.1 section 27)
+        if (_sensorEvents[type]) {
+          log('sensor-apis', 'addEventListener', { event: type }, _sensorEvents[type], {
+            why: 'Sensor event listener — device motion/orientation fingerprint'
+          });
+        }
+        // v4.6.3 NEW: Suspicious behavioral events (was in v3, lost in v4.6)
+        if (_suspiciousEvents[type]) {
+          var info = _suspiciousEvents[type];
+          log(info.cat, 'addEventListener:' + type, { event: type }, info.risk, {
+            why: info.why
+          });
+        }
+        return _origAddEventListener.call(this, type, listener, options);
+      };
+      try { EventTarget.prototype.addEventListener.toString = function() { return 'function addEventListener() { [native code] }'; }; } catch(e) {}
+    } catch(e) {}
+
+
+    // ═══ 39. DUAL NETWORK CATEGORY LOGGING (v4.6.3 NEW — fix network:0 bug) ═══
+    // v4.6.3: In v4.6.2, fetch/XHR/sendBeacon only logged to 'exfiltration' category.
+    // The 'network' category in coverageMatrix was ALWAYS SILENT (0 events).
+    // Fix: Add secondary logging to 'network' for all outbound requests.
+    try {
+      // Wrap the already-hooked fetch to also log to 'network'
+      var _sentinelFetch = window.fetch;
+      window.fetch = function() {
+        var url = arguments[0];
+        if (typeof url === 'object' && url.url) url = url.url;
+        log('network', 'fetch', { url: String(url || '').slice(0, 300), method: (arguments[1] && arguments[1].method) || 'GET' }, 'medium', {
+          why: 'Outbound fetch request — network monitoring'
+        });
+        return _sentinelFetch.apply(this, arguments);
+      };
+      try { window.fetch.toString = function() { return _realToString.call(_sentinelFetch); }; } catch(e) {}
+    } catch(e) {}
+
+    // Wrap XHR.send for dual network logging
+    try {
+      var _sentinelXHRSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.send = function() {
+        log('network', 'xhr.send', { url: this.__sentinel_url || 'unknown', method: this.__sentinel_method || 'GET' }, 'medium', {
+          why: 'XHR send — network monitoring'
+        });
+        return _sentinelXHRSend.apply(this, arguments);
+      };
+      try { XMLHttpRequest.prototype.send.toString = function() { return _realToString.call(_sentinelXHRSend); }; } catch(e) {}
+    } catch(e) {}
+
+    // Wrap sendBeacon for dual network logging
+    try {
+      if (navigator.sendBeacon) {
+        var _sentinelBeacon = navigator.sendBeacon;
+        navigator.sendBeacon = function(url, data) {
+          log('network', 'sendBeacon', { url: String(url).slice(0, 300), size: data ? String(data).length : 0 }, 'medium', {
+            why: 'Beacon — network monitoring'
+          });
+          return _sentinelBeacon.apply(navigator, arguments);
+        };
+        try { navigator.sendBeacon.toString = function() { return _realToString.call(_sentinelBeacon); }; } catch(e) {}
+      }
+    } catch(e) {}
+
+    // Image src tracking for network (1-pixel tracking beacons)
+    try {
+      var _origImageSrc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+      if (_origImageSrc && _origImageSrc.set) {
+        var _origImgSrcSet = _origImageSrc.set;
+        Object.defineProperty(HTMLImageElement.prototype, 'src', {
+          get: _origImageSrc.get,
+          set: function(v) {
+            if (v && typeof v === 'string' && v.startsWith('http')) {
+              log('network', 'img.src', { url: String(v).slice(0, 300) }, 'low', {
+                why: 'Image load — potential tracking pixel'
+              });
+            }
+            return _origImgSrcSet.call(this, v);
+          },
+          enumerable: true,
+          configurable: true
+        });
+      }
+    } catch(e) {}
+
+
+    // ═══ 40. PERMISSIONS API (v4.6.3 — moved from stealth-config to interceptor) ═══
+    // v4.6.3: In v4.6.2 this was in stealth-config.js which ran separately and
+    // REPLACED the interceptor's hook — causing 0 permissions events.
+    try {
+      if (navigator.permissions && navigator.permissions.query) {
+        var _origPermQuery = navigator.permissions.query.bind(navigator.permissions);
+        navigator.permissions.query = function(desc) {
+          var permName = desc ? (desc.name || 'unknown') : 'unknown';
+          log('permissions', 'permissions.query', { name: permName }, 'medium', {
+            why: 'Permissions API query — capability fingerprinting'
+          });
+          return _origPermQuery(desc).then(function(result) {
+            log('permissions', 'permissions.result', { name: permName, state: result.state }, 'medium', {
+              returnValue: result.state,
+              why: 'Permission state — ' + permName
+            });
+            return result;
+          });
+        };
+        try { navigator.permissions.query.toString = function() { return 'function query() { [native code] }'; }; } catch(e) {}
+      }
+    } catch(e) {}
+
+    // ═══ 41. GAMEPAD API (v4.6.3 NEW — was never hooked despite category existing) ═══
+    try {
+      if (navigator.getGamepads) {
+        hookFn(navigator, 'getGamepads', 'gamepad', 'medium', {
+          captureReturn: true,
+          valueFn: function(r) { return r ? { count: Array.from(r).filter(Boolean).length } : { count: 0 }; },
+          why: 'Gamepad API — hardware enumeration fingerprinting'
+        });
+      }
+    } catch(e) {}
+
+    // ═══ 42. CSS.supports (v4.6.3 NEW — for css-fingerprint category) ═══
+    try {
+      if (typeof CSS !== 'undefined' && CSS.supports) {
+        var _origCSSSupports = CSS.supports;
+        CSS.supports = function() {
+          var args = Array.prototype.slice.call(arguments);
+          var query = args.join(', ');
+          log('css-fingerprint', 'CSS.supports', { query: String(query).slice(0, 200) }, 'low', {
+            why: 'CSS feature detection — browser capability fingerprinting'
+          });
+          return _origCSSSupports.apply(CSS, arguments);
+        };
+        try { CSS.supports.toString = function() { return 'function supports() { [native code] }'; }; } catch(e) {}
+      }
+    } catch(e) {}
+
+    // ═══ PUSH TELEMETRY (v4.6.3: 500ms + immediate boot push) ═══
+    if (typeof window.__SENTINEL_PUSH__ === 'function' || typeof window.__s46push__ === 'function') {
+      var _pushFn = typeof window.__SENTINEL_PUSH__ === 'function' ? window.__SENTINEL_PUSH__ : window.__s46push__;
       var _lastPushIndex = 0;
+
+      // v4.6.3: Immediate boot push — capture first-second burst events
+      try {
+        var _pushOrigin = (function() { try { return location.origin; } catch(e) { return 'unknown'; } })();
+        if (_sentinel.events.length > 0) {
+          var bootBatch = _sentinel.events.slice(0, 500);
+          _lastPushIndex = bootBatch.length;
+          _pushFn(JSON.stringify({
+            type: 'boot_batch',
+            frameId: _sentinel.frameId,
+            origin: _pushOrigin,
+            events: bootBatch
+          }));
+        }
+      } catch(e) {}
+
+      // v4.6.3: 500ms interval (was 2000ms — too slow for BrowserScan burst)
       setInterval(function() {
         if (_sentinel.events.length > _lastPushIndex) {
           try {
             var newEvents = _sentinel.events.slice(_lastPushIndex, _lastPushIndex + 500);
             _lastPushIndex += newEvents.length;
-            window.__SENTINEL_PUSH__(JSON.stringify({
+            _pushFn(JSON.stringify({
               type: 'event_batch',
               frameId: _sentinel.frameId,
               origin: (function() { try { return location.origin; } catch(e) { return 'unknown'; } })(),
@@ -979,10 +1243,10 @@ function getInterceptorScript(config) {
             }));
           } catch(e) {}
         }
-      }, 2000);
+      }, 500);
     }
 
-    console.log('[Sentinel v4.4.2] Zero Blind Spot active — 37 categories | Frame: ' + _sentinel.frameId);
+    // Ghost Protocol: zero console output
   })();
   `;
 }

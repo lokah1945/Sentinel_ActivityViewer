@@ -1,63 +1,69 @@
-# Sentinel Activity Viewer v4.4.2
+# 🛡️ Sentinel Activity Viewer v4.6.3
 
-**Surgical Fixes on v4.4.1 (WORKING — 1512 events captured)**
+**Ghost Protocol Forensic Catcher — Maximum Detection Recovery**
 
-## Apa yang Berubah dari v4.4.1?
+Sentinel is a forensic monitoring tool that observes what scripts running in your browser
+are doing — specifically, what fingerprinting and data exfiltration techniques they use.
+Think of it as a security camera for your website: it watches the "thieves" (malicious
+scripts) and reports exactly what they try to steal and how.
 
-v4.4.2 adalah perbaikan **SURGICAL** di atas v4.4.1 yang sudah terbukti bekerja.
-Semua kode interceptor, shield, dan stealth TIDAK DIUBAH — hanya bug reporting
-dan stabilitas pipeline yang diperbaiki.
-
-### Perbaikan:
-1. **Persistent context** (`--persistent`) — hindari deteksi "incognito"
-2. **Anti-stuck [5/7]** — evaluasi frame paralel dengan timeout 3 detik
-3. **Final flush** — tidak ada event hilang di detik-detik terakhir
-4. **Injection flags akurat** — L1/L2/L3 status benar di report
-5. **Frame info proper** — url/origin valid, tidak ada null di unmonitored
-6. **timeSpanMs fix** — menggunakan max(ts) bukan last event ts
-7. **CoverageProof fix** — filter null/blank frames dari perhitungan
-
-### Yang TIDAK Diubah (proven working):
-- api-interceptor.js — 55 hookFn, 9 hookGetter, 5 smartHookGetter (200+ hooks)
-- anti-detection-shield.js — WeakMap descriptor cache + toString protection
-- stealth-config.js — all stealth patches identical to v4.4.1
-- correlation-engine.js — burst/slow-probe/attribution analysis
-- signature-db.js — 5 library signatures
-
-## Instalasi
+## Quick Start
 
 ```bash
 npm install
+node index.js https://browserscan.net --dual-mode --no-headless
 ```
 
-## Penggunaan
+## Usage
 
 ```bash
-# Stealth mode (default)
-node index.js https://browserscan.net
+# Observe mode (no stealth patches — pure monitoring)
+node index.js <url> --no-headless
 
-# Observe mode
-node index.js https://browserscan.net --observe
+# Stealth mode (remove automation artifacts + monitor)
+node index.js <url> --stealth --no-headless
 
-# Non-headless (tampilkan browser)
-node index.js https://browserscan.net --no-headless
+# Dual mode (run both, compare results)
+node index.js <url> --dual-mode --no-headless
 
-# Persistent context (anti-incognito)
-node index.js https://browserscan.net --persistent --no-headless
+# With custom timeout
+node index.js <url> --no-headless --timeout=60000
 
-# Dual mode comparison
-node index.js https://browserscan.net --dual-mode
-
-# Custom timeout (45 detik)
-node index.js https://browserscan.net --timeout=45000
+# Verbose output
+node index.js <url> --no-headless --verbose
 ```
 
-## Expected Results
+## What v4.6.3 Fixes
 
-| Metric | v4.4.1 (baseline) | v4.4.2 (target) |
-|--------|-------------------|-----------------|
-| Events | 1,512 | 1,500+ |
-| Categories | 19/37 | 19-25/37 |
-| timeSpanMs | 0 (BUG) | ~25,000 (fixed) |
-| Coverage | 50% (BUG) | 80-100% (fixed) |
-| Injection flags | L1=false (BUG) | L1/L2/L3 accurate |
+v4.6.2 had a **63% regression** in detection (553 events vs 1512 in v4.4.1).
+v4.6.3 restores all lost detection capabilities:
+
+- ✅ `frameattached` handler restored (late iframes now get hooks)
+- ✅ `framenavigated` re-injection added
+- ✅ `network` category fixed (was always SILENT)
+- ✅ Stealth/interceptor conflict resolved
+- ✅ Event listener monitoring restored (focus/blur/visibility)
+- ✅ Sub-frame collection expanded to include about:blank
+- ✅ Push telemetry 4x faster (500ms vs 2000ms)
+- ✅ New hooks: Permissions, Gamepad, CSS.supports
+
+## Architecture
+
+```
+index.js                    — Browser launch, navigation, collection pipeline
+hooks/
+  anti-detection-shield.js  — Protects sentinel hooks from tampering
+  stealth-config.js         — Minimal automation artifact cleanup
+  api-interceptor.js        — 42 sections, 200+ API hooks, 37 categories
+lib/
+  target-graph.js           — CDP auto-attach for iframes/workers
+  correlation-engine.js     — Event correlation and pattern analysis
+  signature-db.js           — Known fingerprinting signatures
+reporters/
+  report-generator.js       — JSON + HTML forensic reports
+```
+
+## Zero Spoofing Policy
+
+Sentinel does NOT spoof any browser properties. It only **observes and reports**.
+No User-Agent override, no Client Hints manipulation, no fingerprint spoofing.
