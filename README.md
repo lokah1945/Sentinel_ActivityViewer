@@ -1,116 +1,94 @@
-# 🛡️ Sentinel v3.0 — Maling Catcher
+# 🛡️ SENTINEL v6.1.0 — Playwright Official + Plugin Stealth + CDP Collectors
 
-**Browser Activity Viewer with Stealth Mode** — Detects and reports all fingerprinting, tracking, and suspicious browser API activity from any website.
+**Zero Spoofing | Zero Blind Spot | Zero Regression | INVISIBLE**
 
-## 🚀 Quick Start
+## What Changed from v6.0.0
+
+| Aspect | v6.0.0 | v6.1.0 |
+|---|---|---|
+| Browser Driver | Patchright (3rd party fork) | Official Playwright + playwright-extra |
+| Stealth Method | Patchright internal patches | puppeteer-extra-plugin-stealth (12 evasions) |
+| CDP Leak Fix | Patchright handles internally | Re-added console.debug wrap + CDP webdriver script |
+| Runtime.enable | Patchright suppresses | Stealth plugin + defense-in-depth scripts |
+| Stack Filter | Filters 'patchright' | Filters 'playwright-extra' |
+| Regression Rules | 32 | 34 |
+
+## Install
 
 ```bash
-# Install dependencies
 npm install
-
-# Interactive mode (akan minta input URL)
-npm start
-
-# Quick scan dengan stealth (default)
-node index.js browserscan.net
-
-# Observe mode (tanpa stealth, deteksi mentah)
-node index.js browserscan.net --observe
-
-# Dual mode (jalankan kedua mode & bandingkan hasilnya)
-node index.js browserscan.net --dual-mode
-
-# Custom timeout (default 30s)
-node index.js browserscan.net --timeout=45000
-
-# Headless mode
-node index.js browserscan.net --headless
 ```
 
-## 🏗️ Architecture
+## Usage
+
+```bash
+# Default (stealth mode, headless, browserscan.net)
+node index.js
+
+# Custom target
+node index.js https://example.com
+
+# With visible browser
+node index.js https://example.com --no-headless
+
+# Verbose + dual mode
+node index.js https://example.com --no-headless --dual-mode --verbose
+
+# Custom timeout & wait
+node index.js https://example.com --timeout=120000 --wait=60000
+```
+
+## Run Tests
+
+```bash
+npm test              # 34-rule regression gate
+npm run test:stress   # 1000-iteration stress test
+npm run test:full     # Both tests
+
+# Live injection diagnostic
+node tests/test-injection.js https://browserscan.net
+```
+
+## Architecture (10-Layer Pipeline)
 
 ```
-sentinel_v3/
-├── index.js                    # CLI entry point
-├── package.json
+L1:   Persistent Browser Launch (playwright-extra + stealth plugin)
+L1.5: CDP webdriver cleanup (defense-in-depth)
+L2:   addInitScript injection (Shield → Stealth → Interceptor)
+L3:   CDP Session + Push Telemetry
+L3.5: CDP Collectors (Network lifecycle + Security/TLS)
+L4:   TargetGraph (Recursive Auto-Attach)
+L5:   Worker Pipeline
+L6:   Frame Lifecycle Handlers
+L7:   Navigate & Observe (human-like behavior)
+L8:   Dual-Layer Network Capture (CDP primary + Playwright supplementary)
+L9:   Parallel Collection (main + sub-frames + workers + CDP events)
+L10:  Unified Report Generation (JSON + HTML dark theme + CTX)
+```
+
+## File Structure
+
+```
+sentinel-v6.1.0/
+├── index.js                     Main orchestrator (491 lines)
+├── package.json                 Dependencies
+├── README.md                    This file
 ├── hooks/
-│   ├── stealth-config.js       # Stealth plugin + extra hardening
-│   └── api-interceptor.js      # 18-category API hook engine
+│   ├── anti-detection-shield.js Shield + Quiet Mode (201 lines)
+│   ├── stealth-config.js        Stealth + console.debug fix (93 lines)
+│   └── api-interceptor.js       42 categories, 110+ hooks (906 lines)
+├── collectors/
+│   ├── cdp-network-collector.js CDP Network.* monitoring (335 lines)
+│   └── cdp-security-collector.js TLS/certificate monitoring (71 lines)
+├── lib/
+│   ├── target-graph.js          Recursive auto-attach (265 lines)
+│   ├── correlation-engine.js    Burst/entropy analysis (156 lines)
+│   ├── signature-db.js          Library fingerprints (130 lines)
+│   └── event-pipeline.js        Real-time streaming (79 lines)
 ├── reporters/
-│   └── report-generator.js     # JSON + HTML + Context Map generator
-├── output/                     # Scan results saved here
-└── README.md
+│   └── report-generator.js      JSON + HTML + CTX (331 lines)
+└── tests/
+    ├── test-regression.js       34 rules (240 lines)
+    ├── test-stress.js           1000 iterations (140 lines)
+    └── test-injection.js        Live diagnostic (103 lines)
 ```
-
-## 🔍 18 Monitored Categories
-
-| Category | APIs Hooked | Risk |
-|----------|-------------|------|
-| Canvas | toDataURL, toBlob, getImageData, fillText, isPointInPath | 🔴 HIGH |
-| WebGL | getParameter, getExtension, getSupportedExtensions, getShaderPrecisionFormat, readPixels | 🔴 HIGH |
-| Audio | OfflineAudioContext, createOscillator, createDynamicsCompressor, createAnalyser, baseLatency | 🔴 CRITICAL |
-| Font Detection | measureText, document.fonts.check, getBoundingClientRect, offsetWidth | 🔴 HIGH |
-| Fingerprint | userAgent, platform, languages, hardwareConcurrency, deviceMemory, plugins, matchMedia | 🔴 HIGH |
-| Math Fingerprint | acos, acosh, asin, sinh, cos, tan, exp, expm1, log1p (15 functions) | 🟡 HIGH |
-| Permissions | navigator.permissions.query | 🔴 HIGH |
-| Storage | cookie get/set, localStorage, sessionStorage, indexedDB | 🟡 MEDIUM |
-| Screen | width, height, colorDepth, pixelDepth, availWidth, devicePixelRatio | 🟡 MEDIUM |
-| Network | fetch, XMLHttpRequest, sendBeacon | 🟡 MEDIUM |
-| WebRTC | RTCPeerConnection | 🔴 CRITICAL |
-| Performance | getEntries, getEntriesByType, performance.now | 🟡 MEDIUM |
-| Media Devices | enumerateDevices | 🔴 CRITICAL |
-| DOM Probe | createElement (canvas/iframe/audio/video) | 🟡 MEDIUM |
-| Clipboard | readText, writeText | 🔴 CRITICAL |
-| Geolocation | getCurrentPosition, watchPosition | 🔴 CRITICAL |
-| Service Worker | register | 🔴 HIGH |
-| Hardware | getBattery, timezone, architecture | 🟡 MEDIUM |
-
-## 🥷 Stealth Mode
-
-Stealth mode uses **17 evasion techniques** from `puppeteer-extra-plugin-stealth`:
-
-- `chrome.app` / `chrome.csi` / `chrome.loadTimes` / `chrome.runtime`
-- `navigator.webdriver` / `navigator.plugins` / `navigator.vendor` / `navigator.permissions` / `navigator.languages` / `navigator.hardwareConcurrency`
-- `user-agent-override` / `media.codecs`
-- `iframe.contentWindow` / `window.outerdimensions`
-- `webgl.vendor` / `sourceurl` / `defaultArgs`
-
-**Plus Extra Stealth Layer:**
-- Deep webdriver property cleanup
-- Permissions API spoofing
-- Chrome runtime emulation
-- Connection API spoofing
-- Stack trace cleanup (removes playwright/puppeteer traces)
-- Notification permission normalization
-
-## 🔄 Dual Mode
-
-Run `--dual-mode` to execute both STEALTH and OBSERVE scans, then compare:
-
-```
-  📊 DUAL MODE COMPARISON
-  Metric                    STEALTH         OBSERVE
-  ───────────────────────────────────────────────
-  Risk Score                62              48
-  Total Events              1247            869
-  Categories                14              9
-```
-
-This reveals whether the target website **behaves differently** when it detects automation.
-
-## 📊 Output
-
-Each scan generates 3 files in `./output/`:
-- `*_report.json` — Structured metrics, threats, risk score
-- `*_report.html` — Visual dashboard with threat assessment
-- `*_context-map.json` — Frame/origin hierarchy
-
-## ⚠️ FingerprintJS v5 Detection
-
-Sentinel v3 automatically detects the **FingerprintJS v5 signature** pattern:
-- Canvas `isPointInPath` + audio fingerprinting + font detection + math fingerprinting
-- Triggers a CRITICAL threat alert when detected
-
-## License
-
-MIT

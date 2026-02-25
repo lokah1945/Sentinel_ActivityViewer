@@ -1,123 +1,93 @@
-/**
- * Sentinel v3 — Stealth Configuration Manager
- * Manages stealth plugin evasions for realistic browser simulation
- */
+// ═══════════════════════════════════════════════════════════════
+// SENTINEL v6.1.0 — STEALTH CONFIG (PLAYWRIGHT OFFICIAL EDITION)
+// ═══════════════════════════════════════════════════════════════
+// CHANGE LOG v6.1.0 (2026-02-25):
+//   FROM v6.0.0:
+//   - RE-ADDED: console.debug CDP leak wrap (official Playwright sends
+//     Runtime.enable which exposes console.debug as non-native)
+//   - RE-ADDED: console.debug toString masking to return [native code]
+//   - KEPT: navigator.webdriver deletion at prototype level
+//   - KEPT: Automation marker cleanup (30+ markers)
+//   - KEPT: DevTools selector cleanup (document.$, document.$$)
+//   NOTE: v6.0.0 removed these fixes because Patchright handled CDP leaks
+//         internally. Official Playwright does NOT handle them, so they
+//         must be re-added for stealth parity.
+//
+// LAST HISTORY LOG:
+//   v5.0.0: navigator.webdriver delete + marker cleanup (76 lines)
+//   v5.1.0-beta: Added outerWidth/Height override, Notification, rtt
+//   v5.1.0: Removed overrides, added CDP console.debug leak fix
+//   v5.1.0-Final: Removed all cross-frame inconsistency overrides
+//   v6.0.0: Removed console.debug wrap (Patchright eliminates CDP leaks)
+//   v6.1.0: Re-added console.debug wrap (official Playwright needs it)
+//
+// CONTRACT: C-STL-01 through C-STL-04
+// RULE: NO API hooks — ALL hooks belong to api-interceptor.js
+// RULE: NO value spoofing — zero spoofing consistency
+// ═══════════════════════════════════════════════════════════════
 
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+function generateStealthScript() {
+  return `(function() {
+    'use strict';
 
-/**
- * Create stealth plugin with all 17 evasions enabled (default)
- * Plus extra hardening for advanced bot-detection bypass
- */
-function createStealthPlugin(options = {}) {
-  const stealth = StealthPlugin();
+    // [C-STL-01] Delete navigator.webdriver at prototype level
+    try {
+      if ('webdriver' in navigator) {
+        delete Object.getPrototypeOf(navigator).webdriver;
+      }
+      if (navigator.webdriver !== undefined) {
+        Object.defineProperty(navigator, 'webdriver', {
+          get: function() { return undefined; },
+          enumerable: true,
+          configurable: true
+        });
+      }
+    } catch(e) {}
 
-  // By default all evasions are ON. User can disable specific ones:
-  // chrome.app, chrome.csi, chrome.loadTimes, chrome.runtime,
-  // defaultArgs, iframe.contentWindow, media.codecs,
-  // navigator.hardwareConcurrency, navigator.languages,
-  // navigator.permissions, navigator.plugins, navigator.vendor,
-  // navigator.webdriver, sourceurl, user-agent-override,
-  // webgl.vendor, window.outerdimensions
-
-  if (options.disableEvasions && Array.isArray(options.disableEvasions)) {
-    for (const evasion of options.disableEvasions) {
-      stealth.enabledEvasions.delete(evasion);
+    // [C-STL-02] Remove automation framework markers
+    var markers = [
+      '__playwright_evaluation_script__', '__pw_manual', '__pwInitScripts',
+      '__playwright', '__selenium_evaluate', '__webdriver_evaluate',
+      '__driver_evaluate', '__webdriver_script_fn', '__lastWatirAlert',
+      '__nightmareLoaded', '_Selenium_IDE_Recorder', 'callSelenium',
+      '_selenium', 'calledSelenium', '__nightmare',
+      'domAutomation', 'domAutomationController',
+      '__webdriver_script_function', '__webdriver_unwrap',
+      'cdc_adoQpoasnfa76pfcZLmcfl_Array',
+      'cdc_adoQpoasnfa76pfcZLmcfl_Promise',
+      'cdc_adoQpoasnfa76pfcZLmcfl_Symbol'
+    ];
+    for (var i = 0; i < markers.length; i++) {
+      try { if (window[markers[i]] !== undefined) delete window[markers[i]]; } catch(e) {}
+      try { if (document[markers[i]] !== undefined) delete document[markers[i]]; } catch(e) {}
     }
-  }
 
-  return stealth;
+    // [C-STL-03] Console.debug CDP leak fix
+    // Official Playwright sends Runtime.enable which causes console.debug
+    // to become a bound function (detectable via toString !== [native code]).
+    // We wrap it to restore native appearance.
+    try {
+      var origDebug = console.debug;
+      if (origDebug) {
+        var wrappedDebug = function() { return origDebug.apply(console, arguments); };
+        Object.defineProperty(wrappedDebug, 'toString', {
+          value: function() { return 'function debug() { [native code] }'; },
+          writable: false, enumerable: false, configurable: true
+        });
+        Object.defineProperty(wrappedDebug, 'name', {
+          value: 'debug', writable: false, enumerable: false, configurable: true
+        });
+        console.debug = wrappedDebug;
+      }
+    } catch(e) {}
+
+    // [C-STL-04] DevTools selectors cleanup
+    try {
+      if (document.$ !== undefined && typeof document.$ === 'function') delete document.$;
+      if (document.$$ !== undefined && typeof document.$$ === 'function') delete document.$$;
+    } catch(e) {}
+
+  })();`;
 }
 
-/**
- * Extra stealth hardening — injected as page script
- * Covers vectors NOT handled by stealth plugin:
- * - Permissions API spoofing
- * - WebDriver property deep cleanup
- * - Chrome DevTools Protocol leak prevention
- * - navigator.connection spoofing
- * - Battery API spoofing
- */
-function getExtraStealthScript() {
-  return `
-    // ═══ EXTRA STEALTH LAYER ═══
-
-    // 1. Deep webdriver cleanup (beyond stealth plugin)
-    Object.defineProperty(navigator, 'webdriver', {
-      get: () => undefined,
-      configurable: true
-    });
-
-    // Remove automation indicators from window
-    delete window.__playwright;
-    delete window.__pw_manual;
-    delete window.__PW_inspect;
-
-    // 2. Permissions API — return "prompt" for common permissions
-    if (navigator.permissions) {
-      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = async (desc) => {
-        if (['notifications', 'push', 'midi', 'camera', 'microphone',
-             'speaker', 'device-info', 'background-fetch', 'background-sync',
-             'bluetooth', 'persistent-storage', 'ambient-light-sensor',
-             'accelerometer', 'gyroscope', 'magnetometer', 'clipboard-read',
-             'clipboard-write', 'payment-handler', 'idle-detection',
-             'periodic-background-sync', 'screen-wake-lock', 'nfc'
-        ].includes(desc.name)) {
-          return { state: 'prompt', onchange: null };
-        }
-        return originalQuery(desc);
-      };
-    }
-
-    // 3. Chrome runtime — ensure window.chrome exists properly
-    if (!window.chrome) {
-      window.chrome = {};
-    }
-    if (!window.chrome.runtime) {
-      window.chrome.runtime = {
-        connect: () => {},
-        sendMessage: () => {},
-        id: undefined
-      };
-    }
-
-    // 4. Connection API spoofing
-    if (navigator.connection) {
-      Object.defineProperty(navigator.connection, 'rtt', { get: () => 50, configurable: true });
-      Object.defineProperty(navigator.connection, 'downlink', { get: () => 10, configurable: true });
-      Object.defineProperty(navigator.connection, 'effectiveType', { get: () => '4g', configurable: true });
-    }
-
-    // 5. Notification permission — avoid "denied" (suspicious for real user)
-    if (window.Notification) {
-      Object.defineProperty(Notification, 'permission', {
-        get: () => 'default',
-        configurable: true
-      });
-    }
-
-    // 6. Prevent detection of automation via stack trace analysis
-    const origError = Error;
-    const origPrepare = Error.prepareStackTrace;
-    // Cleanup puppeteer/playwright traces from stack
-    Error.prepareStackTrace = function(error, stack) {
-      const filtered = stack.filter(frame => {
-        const file = frame.getFileName() || '';
-        return !file.includes('puppeteer') &&
-               !file.includes('playwright') &&
-               !file.includes('pptr:') &&
-               !file.includes('__puppeteer');
-      });
-      if (origPrepare) return origPrepare(error, filtered);
-      return error.toString() + '\\n' + filtered.map(f =>
-        '    at ' + f.toString()
-      ).join('\\n');
-    };
-
-    // 7. SourceURL cleanup (complement to stealth plugin)
-    // Prevent leaking injected script source URLs
-  `;
-}
-
-module.exports = { createStealthPlugin, getExtraStealthScript };
+module.exports = { generateStealthScript };
