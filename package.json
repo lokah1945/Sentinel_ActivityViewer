@@ -1,7 +1,7 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "4.6.0",
-  "description": "Sentinel v4.6 \u2014 Ghost Protocol Forensic Catcher. Recursive auto-attach, worker pipeline, sandbox triage, quiet mode, zero spoofing.",
+  "version": "4.6.2",
+  "description": "Sentinel v4.6.2 \u2014 Ghost Protocol Forensic Catcher. Persistent context, real GPU, zero spoofing.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
