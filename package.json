@@ -1,25 +1,24 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "3.0.0",
-  "description": "Sentinel v3 \u2014 Browser Activity Viewer & Maling Catcher with Stealth Mode",
+  "version": "6.2.0",
+  "description": "Sentinel v6.2.0 — Official Playwright + rebrowser-patches + Stealth Plugin + Deep CDP Collectors",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "scan": "node index.js",
-    "dual": "node index.js --dual-mode"
+    "patch": "npx rebrowser-patches@latest patch --packageName playwright-core",
+    "unpatch": "npx rebrowser-patches@latest unpatch --packageName playwright-core",
+    "postinstall": "npx rebrowser-patches@latest patch --packageName playwright-core && npx playwright install chromium",
+    "test": "node test-regression.js"
   },
   "dependencies": {
+    "playwright-core": "^1.52.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "playwright": "^1.49.0",
-    "chalk": "^4.1.2",
-    "ora": "^5.4.1"
+    "rebrowser-patches": "^1.0.19"
   },
-  "keywords": [
-    "fingerprint",
-    "browser-security",
-    "stealth",
-    "sentinel"
-  ],
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "license": "MIT"
 }

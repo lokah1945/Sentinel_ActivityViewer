@@ -1,116 +1,114 @@
-# 🛡️ Sentinel v3.0 — Maling Catcher
+# 🛡️ Sentinel Activity Viewer v6.2.0
 
-**Browser Activity Viewer with Stealth Mode** — Detects and reports all fingerprinting, tracking, and suspicious browser API activity from any website.
+> Official Playwright + rebrowser-patches + Stealth Plugin + CDP Deep Collectors
 
-## 🚀 Quick Start
+## What Changed from v6.1
+
+**v6.1 Problem:** BrowserScan detected the browser as bot (Risk Score 100/100) in BOTH observe and stealth modes. The `puppeteer-extra-plugin-stealth` alone does NOT fix the `Runtime.Enable` CDP leak — which is the #1 detection vector used by BrowserScan, Cloudflare, and DataDome.
+
+**v6.2 Solution:** Apply `rebrowser-patches` on top of official `playwright-core`. This patches the source code to prevent `Runtime.Enable` from being called automatically, eliminating the primary CDP detection signal.
+
+### Architecture Stack
+
+```
+┌─────────────────────────────────────────────┐
+│  playwright-extra (plugin framework)         │
+├─────────────────────────────────────────────┤
+│  playwright-core (official, PATCHED)         │
+│  └── rebrowser-patches applied               │
+│      ├── Runtime.Enable leak: FIXED          │
+│      ├── sourceURL: FIXED (analytics.js)     │
+│      └── utility world name: FIXED           │
+├─────────────────────────────────────────────┤
+│  puppeteer-extra-plugin-stealth             │
+│  └── 12 evasion modules active               │
+├─────────────────────────────────────────────┤
+│  Sentinel Custom Layers                      │
+│  ├── AntiDetectionShield (property cleanup)  │
+│  ├── StealthHardener (UA hints, behavior)    │
+│  ├── ApiInterceptor (42-cat JS hooks)        │
+│  ├── CdpCollectorPipeline (network/sec/tgt)  │
+│  ├── RecursiveFrameAttacher (deep iframes)   │
+│  ├── EventPipeline (dedup + backpressure)    │
+│  ├── ForensicEngine (5W1H analysis)          │
+│  └── ReportGenerator (JSON + HTML)           │
+└─────────────────────────────────────────────┘
+```
+
+## Quick Start
 
 ```bash
-# Install dependencies
+# 1. Install
 npm install
 
-# Interactive mode (akan minta input URL)
-npm start
+# 2. The postinstall script automatically:
+#    - Applies rebrowser-patches to playwright-core
+#    - Installs Chromium browser
 
-# Quick scan dengan stealth (default)
-node index.js browserscan.net
+# 3. Run
+node index.js https://browserscan.net --dual-mode --no-headless
 
-# Observe mode (tanpa stealth, deteksi mentah)
-node index.js browserscan.net --observe
-
-# Dual mode (jalankan kedua mode & bandingkan hasilnya)
-node index.js browserscan.net --dual-mode
-
-# Custom timeout (default 30s)
-node index.js browserscan.net --timeout=45000
-
-# Headless mode
-node index.js browserscan.net --headless
+# With persistent profile:
+node index.js https://browserscan.net --persist=./profiles/session1 --no-headless
 ```
 
-## 🏗️ Architecture
+## Manual Patch (if postinstall fails on Windows)
 
-```
-sentinel_v3/
-├── index.js                    # CLI entry point
-├── package.json
-├── hooks/
-│   ├── stealth-config.js       # Stealth plugin + extra hardening
-│   └── api-interceptor.js      # 18-category API hook engine
-├── reporters/
-│   └── report-generator.js     # JSON + HTML + Context Map generator
-├── output/                     # Scan results saved here
-└── README.md
+```powershell
+# Make sure Git is installed (for patch command)
+set PATH=%PATH%;C:\Program Files\Git\usr\bin\
+
+# Apply patches
+npx rebrowser-patches@latest patch --packageName playwright-core
 ```
 
-## 🔍 18 Monitored Categories
+## CLI Options
 
-| Category | APIs Hooked | Risk |
-|----------|-------------|------|
-| Canvas | toDataURL, toBlob, getImageData, fillText, isPointInPath | 🔴 HIGH |
-| WebGL | getParameter, getExtension, getSupportedExtensions, getShaderPrecisionFormat, readPixels | 🔴 HIGH |
-| Audio | OfflineAudioContext, createOscillator, createDynamicsCompressor, createAnalyser, baseLatency | 🔴 CRITICAL |
-| Font Detection | measureText, document.fonts.check, getBoundingClientRect, offsetWidth | 🔴 HIGH |
-| Fingerprint | userAgent, platform, languages, hardwareConcurrency, deviceMemory, plugins, matchMedia | 🔴 HIGH |
-| Math Fingerprint | acos, acosh, asin, sinh, cos, tan, exp, expm1, log1p (15 functions) | 🟡 HIGH |
-| Permissions | navigator.permissions.query | 🔴 HIGH |
-| Storage | cookie get/set, localStorage, sessionStorage, indexedDB | 🟡 MEDIUM |
-| Screen | width, height, colorDepth, pixelDepth, availWidth, devicePixelRatio | 🟡 MEDIUM |
-| Network | fetch, XMLHttpRequest, sendBeacon | 🟡 MEDIUM |
-| WebRTC | RTCPeerConnection | 🔴 CRITICAL |
-| Performance | getEntries, getEntriesByType, performance.now | 🟡 MEDIUM |
-| Media Devices | enumerateDevices | 🔴 CRITICAL |
-| DOM Probe | createElement (canvas/iframe/audio/video) | 🟡 MEDIUM |
-| Clipboard | readText, writeText | 🔴 CRITICAL |
-| Geolocation | getCurrentPosition, watchPosition | 🔴 CRITICAL |
-| Service Worker | register | 🔴 HIGH |
-| Hardware | getBattery, timezone, architecture | 🟡 MEDIUM |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `<URL>` | Target URL to scan | (required) |
+| `--dual-mode` | Run observe + stealth passes | off |
+| `--no-headless` | Visible browser | headless |
+| `--timeout=<ms>` | Navigation timeout | 60000 |
+| `--wait=<ms>` | Post-load wait | 30000 |
+| `--persist=<dir>` | Persistent profile dir | ephemeral |
 
-## 🥷 Stealth Mode
+## Environment Variables
 
-Stealth mode uses **17 evasion techniques** from `puppeteer-extra-plugin-stealth`:
+| Variable | Values | Default |
+|----------|--------|---------|
+| `REBROWSER_PATCHES_RUNTIME_FIX_MODE` | `addBinding`, `alwaysIsolated`, `enableDisable`, `0` | `addBinding` |
+| `REBROWSER_PATCHES_SOURCE_URL` | any filename, `0` to disable | `analytics.js` |
 
-- `chrome.app` / `chrome.csi` / `chrome.loadTimes` / `chrome.runtime`
-- `navigator.webdriver` / `navigator.plugins` / `navigator.vendor` / `navigator.permissions` / `navigator.languages` / `navigator.hardwareConcurrency`
-- `user-agent-override` / `media.codecs`
-- `iframe.contentWindow` / `window.outerdimensions`
-- `webgl.vendor` / `sourceurl` / `defaultArgs`
+## Upgrade from v6.1
 
-**Plus Extra Stealth Layer:**
-- Deep webdriver property cleanup
-- Permissions API spoofing
-- Chrome runtime emulation
-- Connection API spoofing
-- Stack trace cleanup (removes playwright/puppeteer traces)
-- Notification permission normalization
+1. Replace `package.json`
+2. Delete `node_modules`
+3. `npm install`
+4. Copy `lib/` folder
+5. Replace `index.js`
+6. Run `npm test` to verify
 
-## 🔄 Dual Mode
-
-Run `--dual-mode` to execute both STEALTH and OBSERVE scans, then compare:
+## Files
 
 ```
-  📊 DUAL MODE COMPARISON
-  Metric                    STEALTH         OBSERVE
-  ───────────────────────────────────────────────
-  Risk Score                62              48
-  Total Events              1247            869
-  Categories                14              9
+sentinel-v6.2.0/
+├── index.js                          # Main entry point
+├── package.json                      # Dependencies + postinstall patch
+├── test-regression.js                # Regression tests
+├── lib/
+│   ├── anti-detection-shield.js      # Property cleanup + automation removal
+│   ├── stealth-hardener.js           # UA hints, behavioral evasion
+│   ├── api-interceptor.js            # 42-category JS API hooks
+│   ├── cdp-collector-pipeline.js     # CDP Network/Security/Target collectors
+│   ├── recursive-frame-attacher.js   # Deep iframe monitoring
+│   ├── event-pipeline.js             # Central event bus + dedup
+│   ├── forensic-engine.js            # 5W1H analysis engine
+│   ├── report-generator.js           # JSON + HTML report output
+│   └── browser-persistence.js        # Cross-session profile management
+└── output/                           # Report output directory
 ```
 
-This reveals whether the target website **behaves differently** when it detects automation.
+## Why Not Patchright?
 
-## 📊 Output
-
-Each scan generates 3 files in `./output/`:
-- `*_report.json` — Structured metrics, threats, risk score
-- `*_report.html` — Visual dashboard with threat assessment
-- `*_context-map.json` — Frame/origin hierarchy
-
-## ⚠️ FingerprintJS v5 Detection
-
-Sentinel v3 automatically detects the **FingerprintJS v5 signature** pattern:
-- Canvas `isPointInPath` + audio fingerprinting + font detection + math fingerprinting
-- Triggers a CRITICAL threat alert when detected
-
-## License
-
-MIT
+User requirement: full official Playwright with plugin support. `rebrowser-patches` achieves the same Runtime.Enable fix while keeping 100% official Playwright API + plugin ecosystem compatibility.
