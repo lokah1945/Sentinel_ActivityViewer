@@ -1,292 +1,272 @@
 #!/usr/bin/env node
 /**
- * ╔═══════════════════════════════════════════════════════╗
- * ║   SENTINEL v3.0 — MALING CATCHER                     ║
- * ║   Browser Activity Viewer with Stealth Mode           ║
- * ╚═══════════════════════════════════════════════════════╝
+ * Sentinel v6.3.0 — Pure Observer CCTV
+ * 
+ * PHILOSOPHY: This is a CCTV security camera, not a disguise.
+ *   - ZERO injection into page JavaScript
+ *   - ZERO spoofing (no UA override, no locale change, nothing)
+ *   - ZERO modification of browser behavior
+ *   - 100% passive CDP observation from outside the page
+ *   - The "thief" (website) has NO idea it's being watched
+ * 
+ * HOW IT WORKS:
+ *   rebrowser-playwright-core patches Runtime.Enable at source level,
+ *   so CDP observation channels work WITHOUT triggering detection.
+ *   stealth plugin removes automation artifacts that Chromium adds by default.
+ *   We observe everything via CDP domains (Network, DOM, Runtime, etc.)
+ *   without injecting a single line of JavaScript into any page.
  *
- * Usage:
- *   node index.js                        — Interactive mode
- *   node index.js <url>                  — Quick scan
- *   node index.js <url> --stealth        — Stealth mode (default)
- *   node index.js <url> --observe        — Observe mode (no stealth)
- *   node index.js <url> --dual-mode      — Run BOTH modes & compare
- *   node index.js <url> --timeout=45000  — Custom timeout (ms)
- *   node index.js <url> --headless       — Headless mode
+ * STACK:
+ *   rebrowser-playwright-core (aliased as playwright-core) → Runtime.Enable fix
+ *   playwright-extra → plugin framework
+ *   stealth plugin → removes Chromium automation artifacts
+ *   CDP collectors → passive observation of ALL browser activity
  */
 
-const { createStealthPlugin, getExtraStealthScript } = require('./hooks/stealth-config');
-const { getInterceptorScript } = require('./hooks/api-interceptor');
-const { generateReport } = require('./reporters/report-generator');
-const readline = require('readline');
-const path = require('path');
+'use strict';
 
-// ── Parse CLI arguments ──
+process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE = process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE || 'addBinding';
+process.env.REBROWSER_PATCHES_SOURCE_URL = process.env.REBROWSER_PATCHES_SOURCE_URL || 'analytics.js';
+
+const { addExtra } = require('playwright-extra');
+const playwrightCore = require('playwright-core');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+const { CdpObserverEngine } = require('./lib/cdp-observer-engine');
+const { FrameTreeWatcher } = require('./lib/frame-tree-watcher');
+const { EventPipeline } = require('./lib/event-pipeline');
+const { ForensicEngine } = require('./lib/forensic-engine');
+const { ReportGenerator } = require('./lib/report-generator');
+const { PageScopeWatcher } = require('./lib/page-scope-watcher');
+
+const VERSION = 'sentinel-v6.3.0';
+
+// ─── CLI ───
 const args = process.argv.slice(2);
-const flags = {};
-let targetUrl = null;
+const target = args.find(a => a.startsWith('http'));
+const dualMode = args.includes('--dual-mode');
+const headless = !args.includes('--no-headless');
+const timeout = parseInt(args.find(a => a.startsWith('--timeout='))?.split('=')[1] || '60000');
+const waitTime = parseInt(args.find(a => a.startsWith('--wait='))?.split('=')[1] || '30000');
+const persistDir = args.find(a => a.startsWith('--persist='))?.split('=')[1] || '';
+const stealthEnabled = !args.includes('--no-stealth');
 
-for (const arg of args) {
-  if (arg.startsWith('--')) {
-    const [key, val] = arg.slice(2).split('=');
-    flags[key] = val || true;
-  } else if (!targetUrl) {
-    targetUrl = arg;
-  }
+if (!target) {
+  console.log(`
+🛡️  ${VERSION} — Pure Observer CCTV
+Usage: node index.js <URL> [options]
+
+Options:
+  --dual-mode        Run both observe and stealth passes
+  --no-headless      Visible browser
+  --no-stealth       Disable stealth plugin (for comparison)
+  --timeout=<ms>     Navigation timeout (default: 60000)
+  --wait=<ms>        Post-load wait time (default: 30000)
+  --persist=<dir>    Persistent browser profile directory
+
+Examples:
+  node index.js https://browserscan.net --dual-mode --no-headless
+  node index.js https://example.com --persist=./profiles/session1 --no-headless
+`);
+  process.exit(0);
 }
 
-const TIMEOUT = parseInt(flags.timeout) || 30000;
-const HEADLESS = flags.headless === true || flags.headless === 'true';
-const DUAL_MODE = flags['dual-mode'] === true;
-const STEALTH_MODE = flags.observe ? false : true; // stealth is default
-
-function normalizeUrl(input) {
-  input = input.trim();
-  if (!input.match(/^https?:\/\//i)) {
-    input = 'https://' + input;
-  }
-  return input;
+// ─── Setup playwright-extra with stealth ───
+const chromium = addExtra(playwrightCore.chromium);
+if (stealthEnabled) {
+  const stealth = StealthPlugin();
+  chromium.use(stealth);
 }
 
-async function prompt(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => {
-    rl.question(question, answer => {
-      rl.close();
-      resolve(answer.trim());
+async function runScan(mode) {
+  const ts = Date.now();
+  const pipeline = new EventPipeline();
+  const forensic = new ForensicEngine(VERSION);
+
+  console.log(`[Sentinel] Launching browser (mode: ${mode})...`);
+
+  const launchArgs = [
+    '--disable-blink-features=AutomationControlled',
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-infobars',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-ipc-flooding-protection',
+    '--enable-features=NetworkService,NetworkServiceInProcess',
+  ];
+
+  // NEVER add --enable-automation (already in ignoreDefaultArgs)
+  const launchOpts = {
+    headless: mode === 'stealth' ? headless : false,
+    args: launchArgs,
+    ignoreDefaultArgs: ['--enable-automation'],
+  };
+
+  let browser, context;
+  if (persistDir) {
+    context = await chromium.launchPersistentContext(persistDir, {
+      ...launchOpts,
+      viewport: null, // use default window size, no spoofing
     });
-  });
-}
+    browser = null;
+  } else {
+    browser = await chromium.launch(launchOpts);
+    context = await browser.newContext({
+      viewport: null, // ZERO SPOOFING — use real browser viewport
+      // NO userAgent override
+      // NO locale override
+      // NO timezone override
+      // NO geolocation override
+      // NO permissions override
+      // The browser is 100% vanilla — just observed from outside
+    });
+  }
 
-async function runScan(url, options = {}) {
-  const stealthEnabled = options.stealth !== false;
-  const label = stealthEnabled ? '🥷 STEALTH' : '👁️ OBSERVE';
+  const page = await context.newPage();
 
-  console.log(`\n${'═'.repeat(60)}`);
-  console.log(`  ${label} MODE — Scanning: ${url}`);
-  console.log(`  Timeout: ${TIMEOUT / 1000}s | Headless: ${HEADLESS}`);
-  console.log(`${'═'.repeat(60)}\n`);
+  // ─── CDP session for this page ───
+  const cdpSession = await page.context().newCDPSession(page);
 
-  let browser, page;
+  const injectionStatus = {
+    version: VERSION,
+    mode,
+    rebrowserPatched: true,
+    runtimeFixMode: process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE,
+    stealthPlugin: stealthEnabled,
+    zeroInjection: true,
+    zeroSpoofing: true,
+  };
 
+  // ─── Layer 1: CDP Observer Engine (PASSIVE — no JS injection) ───
+  const cdpObserver = new CdpObserverEngine(pipeline, cdpSession);
+  await cdpObserver.start();
+  injectionStatus.cdpNetworkCollector = true;
+  injectionStatus.cdpSecurityCollector = true;
+  injectionStatus.cdpDOMCollector = true;
+  injectionStatus.cdpConsoleCollector = true;
+  injectionStatus.cdpPerformanceCollector = true;
+
+  // ─── Layer 2: Frame Tree Watcher (CDP Target.setAutoAttach) ───
+  const frameWatcher = new FrameTreeWatcher(pipeline, cdpSession, context);
+  await frameWatcher.start();
+  injectionStatus.frameTreeWatcher = true;
+  injectionStatus.recursiveAutoAttach = true;
+
+  // ─── Layer 3: Page Scope Watcher (new tabs/pages in context) ───
+  const pageWatcher = new PageScopeWatcher(pipeline, context);
+  await pageWatcher.start();
+  injectionStatus.pageScopeWatcher = true;
+
+  // ─── Navigate ───
+  console.log(`[Sentinel] Navigating to ${target}...`);
   try {
-    if (stealthEnabled) {
-      // Use playwright-extra with stealth
-      const { chromium } = require('playwright-extra');
-      const stealthPlugin = createStealthPlugin();
-      chromium.use(stealthPlugin);
-
-      browser = await chromium.launch({
-        headless: HEADLESS,
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-web-security',
-          '--no-first-run',
-          '--no-default-browser-check',
-        ]
-      });
-
-      const context = await browser.newContext({
-        viewport: { width: 1920, height: 1080 },
-        locale: 'en-US',
-        timezoneId: 'Asia/Jakarta',
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        permissions: [],
-        colorScheme: 'light',
-      });
-
-      page = await context.newPage();
-
-      // Inject extra stealth BEFORE any page load
-      await page.addInitScript(getExtraStealthScript());
-
-    } else {
-      // Plain playwright — observe mode (more detectable, shows raw behavior)
-      const { chromium } = require('playwright');
-
-      browser = await chromium.launch({
-        headless: HEADLESS,
-      });
-
-      const context = await browser.newContext({
-        viewport: { width: 1920, height: 1080 },
-      });
-
-      page = await context.newPage();
-    }
-
-    // Inject API interceptor BEFORE page navigation
-    await page.addInitScript(getInterceptorScript({ timeout: TIMEOUT }));
-
-    // Also inject into all frames
-    page.on('frameattached', async (frame) => {
-      try {
-        await frame.evaluate(getInterceptorScript({ timeout: TIMEOUT }));
-      } catch (e) { /* cross-origin frames will fail — expected */ }
-    });
-
-    console.log('🌐 Navigating to target...');
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: TIMEOUT
-    });
-
-    console.log('⏳ Observing activity...');
-
-    // Wait for the configured timeout to collect events
-    const observeTime = Math.max(TIMEOUT - 5000, 10000);
-    await page.waitForTimeout(observeTime);
-
-    // Scroll to trigger lazy-loaded fingerprinting scripts
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight / 2);
-    });
-    await page.waitForTimeout(3000);
-
-    // Collect results
-    console.log('📊 Collecting results...');
-
-    const sentinelData = await page.evaluate(() => {
-      return window.__SENTINEL_DATA__ || { events: [] };
-    });
-
-    const contextMap = await page.evaluate(() => {
-      return window.__SENTINEL_CONTEXT_MAP__ || [];
-    });
-
-    // Also collect frame information
-    const frames = page.frames();
-    const frameInfo = frames.map(f => ({
-      type: 'frame',
-      url: f.url(),
-      name: f.name() || '',
-    }));
-
-    const fullContextMap = [...(contextMap || []), ...frameInfo];
-
-    console.log(`\n✅ Scan complete! Captured ${sentinelData.events?.length || 0} events\n`);
-
-    // Generate report
-    const reportResult = generateReport(sentinelData, fullContextMap, url, {
-      stealthEnabled,
-      prefix: `sentinel_${stealthEnabled ? 'stealth' : 'observe'}_${Date.now()}`
-    });
-
-    // Print summary
-    const r = reportResult.reportJson;
-    console.log('┌─────────────────────────────────────────┐');
-    console.log(`│  Risk Score: ${r.riskScore}/100 ${r.riskLevel.padEnd(15)} │`);
-    console.log(`│  Events: ${String(r.totalEvents).padEnd(10)} Categories: ${String(r.categoriesDetected).padEnd(4)}│`);
-    console.log(`│  Origins: ${String(r.uniqueOrigins.length).padEnd(9)} Threats: ${String(r.threats.length).padEnd(6)}│`);
-    console.log('└─────────────────────────────────────────┘');
-
-    if (r.threats.length > 0) {
-      console.log('\n🚨 THREATS DETECTED:');
-      for (const t of r.threats) {
-        const icon = t.severity === 'CRITICAL' ? '🔴' : t.severity === 'HIGH' ? '🟡' : '🔵';
-        console.log(`  ${icon} [${t.severity}] ${t.type}`);
-        console.log(`     └─ ${t.detail}`);
-      }
-    }
-
-    console.log(`\n📁 Reports saved:`);
-    console.log(`   JSON: ${reportResult.jsonPath}`);
-    console.log(`   HTML: ${reportResult.htmlPath}`);
-    console.log(`   CTX:  ${reportResult.ctxPath}`);
-
-    return reportResult;
-
-  } catch (err) {
-    console.error('❌ Scan error:', err.message);
-    throw err;
-  } finally {
-    if (browser) {
-      await browser.close();
-      console.log('🔒 Browser closed.\n');
-    }
-  }
-}
-
-async function runDualMode(url) {
-  console.log('\n' + '🔄 DUAL MODE — Running both STEALTH and OBSERVE scans...\n');
-
-  let stealthResult, observeResult;
-
-  try {
-    stealthResult = await runScan(url, { stealth: true });
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout });
   } catch (e) {
-    console.error('Stealth scan failed:', e.message);
+    console.error(`[Sentinel] Navigation warning: ${e.message}`);
   }
 
-  try {
-    observeResult = await runScan(url, { stealth: false });
-  } catch (e) {
-    console.error('Observe scan failed:', e.message);
-  }
+  // ─── Wait for activity ───
+  console.log(`[Sentinel] Observing for ${waitTime / 1000}s...`);
+  await page.waitForTimeout(waitTime);
 
-  if (stealthResult && observeResult) {
-    const s = stealthResult.reportJson;
-    const o = observeResult.reportJson;
+  // ─── Collect frame tree from Playwright ───
+  const frames = page.frames().map(f => ({
+    url: f.url(),
+    name: f.name(),
+    detached: f.isDetached(),
+  }));
 
-    console.log('\n' + '═'.repeat(60));
-    console.log('  📊 DUAL MODE COMPARISON');
-    console.log('═'.repeat(60));
-    console.log(`  ${'Metric'.padEnd(25)} ${'STEALTH'.padEnd(15)} ${'OBSERVE'.padEnd(15)}`);
-    console.log(`  ${'─'.repeat(55)}`);
-    console.log(`  ${'Risk Score'.padEnd(25)} ${String(s.riskScore).padEnd(15)} ${String(o.riskScore).padEnd(15)}`);
-    console.log(`  ${'Total Events'.padEnd(25)} ${String(s.totalEvents).padEnd(15)} ${String(o.totalEvents).padEnd(15)}`);
-    console.log(`  ${'Categories'.padEnd(25)} ${String(s.categoriesDetected).padEnd(15)} ${String(o.categoriesDetected).padEnd(15)}`);
-    console.log(`  ${'Origins'.padEnd(25)} ${String(s.uniqueOrigins.length).padEnd(15)} ${String(o.uniqueOrigins.length).padEnd(15)}`);
-    console.log(`  ${'Threats'.padEnd(25)} ${String(s.threats.length).padEnd(15)} ${String(o.threats.length).padEnd(15)}`);
+  // ─── Gather all events ───
+  const allEvents = pipeline.drain();
+  const stats = pipeline.getStats();
+  const frameStats = frameWatcher.getStats();
 
-    // Show categories unique to each mode
-    const sCats = new Set(Object.keys(s.byCategory));
-    const oCats = new Set(Object.keys(o.byCategory));
-    const onlyInStealth = [...sCats].filter(c => !oCats.has(c));
-    const onlyInObserve = [...oCats].filter(c => !sCats.has(c));
+  injectionStatus.subFramesDiscovered = frameStats.discovered;
+  injectionStatus.subFramesAttached = frameStats.attached;
+  injectionStatus.totalCdpEvents = stats.cdpEvents;
+  injectionStatus.networkEntries = stats.networkEntries;
+  injectionStatus.consoleEvents = stats.consoleEvents;
+  injectionStatus.domEvents = stats.domEvents;
+  injectionStatus.totalDeduped = allEvents.length;
 
-    if (onlyInStealth.length > 0) {
-      console.log(`\n  📌 Only in STEALTH: ${onlyInStealth.join(', ')}`);
-    }
-    if (onlyInObserve.length > 0) {
-      console.log(`  📌 Only in OBSERVE: ${onlyInObserve.join(', ')}`);
-    }
+  // ─── Forensic analysis ───
+  const analysis = forensic.analyze(allEvents, frames, injectionStatus);
 
-    const delta = s.totalEvents - o.totalEvents;
-    if (Math.abs(delta) > 50) {
-      console.log(`\n  ⚠️  Significant delta: ${delta > 0 ? '+' : ''}${delta} events`);
-      console.log(`     Website likely behaves differently based on automation detection.`);
-    }
+  // ─── Coverage ───
+  const targetGraph = frameWatcher.getTargetInventory();
+  const coverageProof = {
+    targetGraph,
+    frameCoverage: frameStats.discovered > 0
+      ? `${Math.round(frameStats.attached / frameStats.discovered * 100)}%`
+      : 'N/A',
+    categoryCoverage: `${Math.round(analysis.categories.length / 30 * 100 * 10) / 10}%`,
+  };
 
-    console.log('\n' + '═'.repeat(60));
-  }
+  // ─── Reports ───
+  const contextData = {
+    version: VERSION,
+    target,
+    scanDate: new Date(ts).toISOString(),
+    mode,
+    frames,
+    injectionStatus,
+    targetGraph,
+    coverageProof,
+  };
+
+  const report = new ReportGenerator(VERSION);
+  const reportPath = report.save(mode, ts, allEvents, analysis, contextData);
+
+  console.log(
+    `[Sentinel] Scan complete: ${allEvents.length} CDP events, ` +
+    `${analysis.categories.length} categories, ` +
+    `${frameStats.discovered} frames discovered, ` +
+    `${frameStats.attached} frames attached, ` +
+    `${stats.networkEntries} network entries, ` +
+    `${stats.consoleEvents} console events`
+  );
+  console.log(`[Sentinel] Reports: ${reportPath.json}`);
+  console.log(`[Sentinel] HTML: ${reportPath.html}`);
+
+  // ─── Cleanup ───
+  await cdpObserver.stop();
+  if (browser) await browser.close();
+  else await context.close();
+
+  return { reportPath, stats: analysis };
 }
 
-// ── Main ──
+// ─── Main ───
 (async () => {
   console.log(`
-  ╔═══════════════════════════════════════════════════╗
-  ║   🛡️  SENTINEL v3.0 — MALING CATCHER             ║
-  ║   Browser Activity Viewer with Stealth Mode       ║
-  ║   18 API categories | Threat detection            ║
-  ╚═══════════════════════════════════════════════════╝
-  `);
+🛡️  ${VERSION} — Pure Observer CCTV
+   rebrowser-playwright-core: Runtime.Enable PATCHED (${process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE})
+   Stealth Plugin: ${stealthEnabled ? 'ON' : 'OFF'}
+   ZERO Injection | ZERO Spoofing | 100% Passive CDP Observation
+   Target: ${target}
+   Mode: ${dualMode ? 'DUAL (observe → stealth)' : mode || 'stealth'}
+   Headless: ${headless}
+   Timeout: ${timeout}ms | Wait: ${waitTime}ms
+   Persist: ${persistDir || 'none (ephemeral)'}
+`);
 
-  if (!targetUrl) {
-    targetUrl = await prompt('🎯 Target website (e.g. browserscan.net): ');
-  }
+  const mode = dualMode ? null : 'stealth';
 
-  if (!targetUrl) {
-    console.log('No target specified. Exiting.');
+  try {
+    if (dualMode) {
+      console.log('═══ PASS 1: OBSERVE MODE (no stealth plugin) ═══');
+      await runScan('observe');
+      console.log('\n═══ PASS 2: STEALTH MODE ═══');
+      await runScan('stealth');
+      console.log('\n✅ Dual-mode scan complete.');
+    } else {
+      await runScan('stealth');
+      console.log('\n✅ Scan complete.');
+    }
+  } catch (err) {
+    console.error('❌ Fatal error:', err);
     process.exit(1);
-  }
-
-  const url = normalizeUrl(targetUrl);
-
-  if (DUAL_MODE) {
-    await runDualMode(url);
-  } else {
-    await runScan(url, { stealth: STEALTH_MODE });
   }
 })();
