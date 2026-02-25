@@ -1,17 +1,19 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "4.6.3",
-  "description": "Sentinel v4.6.3 \u2014 Ghost Protocol Forensic Catcher | Maximum Detection Recovery",
+  "version": "5.0.0",
+  "description": "Unified Forensic Browser Activity Monitor — Zero Blind Spot, Zero Regression",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "observe": "node index.js --no-headless",
-    "stealth": "node index.js --stealth --no-headless",
-    "dual": "node index.js --dual-mode --no-headless"
+    "scan": "node index.js",
+    "test": "node tests/test-regression.js",
+    "test:stress": "node tests/test-stress.js",
+    "test:injection": "node tests/test-injection.js",
+    "test:full": "npm test && npm run test:stress",
+    "prerelease": "npm run test:full"
   },
   "dependencies": {
     "playwright": "^1.50.0"
   },
-  "author": "Sentinel Project",
+  "keywords": ["fingerprinting", "forensic", "browser", "sentinel", "security"],
   "license": "MIT"
 }

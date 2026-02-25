@@ -1,80 +1,62 @@
-/**
- * Sentinel v4.6.3 — Stealth Configuration (GHOST PROTOCOL)
- *
- * v4.6.3 CHANGES from v4.6.2:
- *   - Removed Permissions API patch (was interfering with interceptor's permissions hook)
- *   - Stealth is now MINIMAL: only webdriver removal + Playwright marker cleanup
- *   - Detection hooks belong to the interceptor, NOT stealth
- *   - No chrome.runtime/plugins/csi polyfills (persistent context provides them)
- *
- * PHILOSOPHY: Stealth should ONLY remove automation artifacts.
- *   It must NEVER wrap APIs that the interceptor needs to hook.
- */
+// ═══════════════════════════════════════════════════════════════
+//  SENTINEL v5.0.0 — STEALTH CONFIG (MINIMAL)
+//  Contract: C-STL-01 through C-STL-10
+//  RULE: This file must NEVER exceed 80 lines.
+//  RULE: NO API hooks here — ALL hooks belong to interceptor.
+//  RULE: NO spoofing — zero spoofing consistency philosophy.
+// ═══════════════════════════════════════════════════════════════
 
-function createStealthPlugin() { return null; }
+function generateStealthScript() {
+  return `(function() {
+    'use strict';
+    // [C-STL-01] Remove navigator.webdriver (Playwright artifact)
+    try {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: function() { return undefined; },
+        enumerable: true, configurable: true
+      });
+    } catch(e) {}
 
-function getExtraStealthScript(config) {
-  return `
-    // ═══ SENTINEL v4.6.3 GHOST PROTOCOL — MINIMAL STEALTH ═══
-    (function() {
-      'use strict';
+    // [C-STL-02] Remove Playwright internal markers
+    var markers = [
+      '__playwright_evaluation_script__',
+      '__pw_manual',
+      '__pwInitScripts',
+      '__playwright',
+      '__selenium_evaluate',
+      '__webdriver_evaluate',
+      '__driver_evaluate',
+      '__webdriver_script_fn',
+      '__lastWatirAlert',
+      '__nightmareLoaded',
+      '_Selenium_IDE_Recorder',
+      'callSelenium',
+      '_selenium',
+      'calledSelenium',
+      '__nightmare',
+      'domAutomation',
+      'domAutomationController'
+    ];
+    for (var i = 0; i < markers.length; i++) {
+      try { delete window[markers[i]]; } catch(e) {}
+      try { delete document[markers[i]]; } catch(e) {}
+    }
 
-      // ── 1. Remove navigator.webdriver ──
-      try {
-        var navProto = Object.getPrototypeOf(navigator);
-        if (navProto) {
-          try {
-            Object.defineProperty(navProto, 'webdriver', {
-              get: function() { return false; },
-              configurable: true
-            });
-          } catch(e) {}
-        }
-        try {
-          var instDesc = Object.getOwnPropertyDescriptor(navigator, 'webdriver');
-          if (instDesc) {
-            Object.defineProperty(navigator, 'webdriver', {
-              get: function() { return false; },
-              configurable: true
-            });
-          }
-        } catch(e) {}
-      } catch(e) {}
-
-      // ── 2. Remove Playwright/CDP global markers ──
-      try {
-        var markers = [
-          '__playwright', '__pw_manual', '__PW_inspect', '__pwInitScripts',
-          'cdc_adoQpoasnfa76pfcZLmcfl_Array',
-          'cdc_adoQpoasnfa76pfcZLmcfl_Promise',
-          'cdc_adoQpoasnfa76pfcZLmcfl_Symbol',
-          'domAutomation', 'domAutomationController'
-        ];
-        for (var i = 0; i < markers.length; i++) {
-          try { if (markers[i] in window) delete window[markers[i]]; } catch(e) {}
-        }
-      } catch(e) {}
-
-      // ── 3. Clean Error stack traces from automation paths ──
-      try {
-        if (Error.prepareStackTrace) {
-          var _origPrepare = Error.prepareStackTrace;
-          Error.prepareStackTrace = function(error, stack) {
-            var result = _origPrepare ? _origPrepare(error, stack) : error.stack;
-            if (typeof result === 'string') {
-              result = result.replace(/playwright|puppeteer|chromium/gi, 'internal');
-            }
-            return result;
-          };
-        }
-      } catch(e) {}
-
-      // v4.6.3: NO Permissions API patch (was causing hook conflict with interceptor)
-      // v4.6.3: NO chrome.runtime polyfill (persistent context provides real chrome object)
-      // v4.6.3: NO chrome.csi/loadTimes (deprecated since Chrome 130+)
-      // v4.6.3: NO plugins polyfill (--use-gl=desktop provides real plugin data)
-    })();
-  `;
+    // Chrome polyfill — only if persistent context doesn't provide them
+    if (!window.chrome) { window.chrome = {}; }
+    if (!window.chrome.runtime) {
+      Object.defineProperty(window.chrome, 'runtime', {
+        get: function() { return { OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' }, PlatformArch: {}, PlatformNaclArch: {}, PlatformOs: {}, RequestUpdateCheckStatus: {}, connect: function() { throw new Error('Could not establish connection.'); }, id: undefined, sendMessage: function() { throw new Error('Could not establish connection.'); } }; },
+        enumerable: true, configurable: true
+      });
+    }
+    if (!window.chrome.csi) {
+      window.chrome.csi = function() { return { startE: Date.now(), onloadT: Date.now(), pageT: Math.random() * 1000, tran: 15 }; };
+    }
+    if (!window.chrome.loadTimes) {
+      window.chrome.loadTimes = function() { return { commitLoadTime: Date.now() / 1000, connectionInfo: 'h2', finishDocumentLoadTime: Date.now() / 1000 + 0.1, finishLoadTime: Date.now() / 1000 + 0.2, firstPaintAfterLoadTime: 0, firstPaintTime: Date.now() / 1000 + 0.05, navigationType: 'Other', npnNegotiatedProtocol: 'h2', requestTime: Date.now() / 1000 - 0.3, startLoadTime: Date.now() / 1000 - 0.2, wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: true, wasNpnNegotiated: true }; };
+    }
+  })();`;
 }
 
-module.exports = { createStealthPlugin, getExtraStealthScript };
+module.exports = { generateStealthScript };

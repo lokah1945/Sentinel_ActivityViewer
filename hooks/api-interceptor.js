@@ -1,1254 +1,887 @@
-/**
- * Sentinel v4.6.3 — Forensic API Interceptor (CRITICAL FIX)
- * 
- * ROOT CAUSE OF v4.4 FAILURE (3-4 events instead of 786):
- *   v4.4 hooked Navigator.prototype getters, but stealth-config.js patches
- *   navigator INSTANCE properties with Object.defineProperty(navigator, ...).
- *   JavaScript property lookup: instance → prototype. Instance SHADOWS prototype.
- *   Result: ALL navigator property accesses bypassed our monitoring hooks.
- *
- * FIX IN v4.4.1:
- *   1. Smart target detection (from v4.1): check WHERE the getter actually lives
- *      (prototype vs instance) and hook the right target
- *   2. For properties patched by stealth, hook the INSTANCE (not prototype)
- *   3. Cookie getter + setter both hooked (v4.4 only hooked getter)
- *   4. Property-enum filtered to navigator/screen targets only (like v4.1)
- *   5. createElement filtered to fingerprint-relevant tags only (like v4.1)
- *   6. Direct hooking fallback is EQUALLY robust (not simplified)
- *
- * Categories (37): canvas, webgl, audio, font-detection, fingerprint, screen,
- *   storage, network, perf-timing, media-devices, dom-probe, clipboard,
- *   geolocation, service-worker, hardware, exfiltration, webrtc,
- *   math-fingerprint, permissions, speech, client-hints, intl-fingerprint,
- *   css-fingerprint, property-enum, offscreen-canvas, honeypot, credential,
- *   system, encoding, worker, webassembly, keyboard-layout, sensor-apis,
- *   visualization, device-info, battery, gamepad
- */
+// ═══════════════════════════════════════════════════════════════════
+//  SENTINEL v5.0.0 — UNIFIED API INTERCEPTOR
+//  Contract: C-INT-01 through C-INT-15
+//  42 categories, 110+ hook points
+//  Source of truth: v4.6.3 recovery + v4.6 Ghost Protocol + v4.4.1 smartHookGetter
+// ═══════════════════════════════════════════════════════════════════
 
-function getInterceptorScript(config) {
-  config = config || {};
-  var timeout = config.timeout || 30000;
-  var stealthEnabled = !!config.stealthEnabled;
-  var stackSampleRate = config.stackSampleRate || 10;
-
-  return `
-  (function() {
+function generateInterceptorScript() {
+  return `(function() {
     'use strict';
 
-    // ── Guard: prevent double-injection ──
-    // QUIET MODE: use non-obvious internal marker
-    var _qk = '_s' + Math.random().toString(36).substr(2,4);
-    if (window[_qk]) return;
-    window[_qk] = true;
+    // ─── [C-INT-13] Guard variable with RANDOM name ───
+    var guardName = '__s_' + Math.random().toString(36).substring(2, 10);
+    if (window[guardName]) return;
+    Object.defineProperty(window, guardName, { value: true, writable: false, enumerable: false, configurable: false });
 
-    // ── Store REAL natives before anything else ──
-    var _realGetDesc = Object.getOwnPropertyDescriptor;
-    var _realDefProp = Object.defineProperty;
-    var _realToString = Function.prototype.toString;
+    // ─── Globals (non-enumerable) [C-INT-15] ───
+    var events = [];
+    var eventCounter = 0;
+    var categoriesMonitored = 42;
+    var pushThreshold = 20;
+    var VALUE_CAP = 500;
+    var DETAIL_CAP = 500;
 
-    var _sentinel = {
-      events: [],
-      startTime: Date.now(),
-      bootOk: false,
-      frameId: Math.random().toString(36).substr(2, 8),
-      config: { timeout: ${timeout}, maxEvents: 100000, stackSampleRate: ${stackSampleRate} },
-      counters: {},
-      dedupCount: 0
+    Object.defineProperty(window, '__SENTINEL_DATA__', {
+      value: {
+        events: events,
+        version: 'sentinel-v5.0.0',
+        categoriesMonitored: categoriesMonitored,
+        startTime: Date.now(),
+        injectionFlags: { shield: !!window.__SENTINEL_SHIELD__, stealth: true, interceptor: true }
+      },
+      writable: false, enumerable: false, configurable: false
+    });
+
+    // ─── Utility functions ───
+    var realGetDesc = Object.getOwnPropertyDescriptor;
+    var realDefProp = Object.defineProperty;
+    var realToString = Function.prototype.toString;
+    var origFetch = window.fetch;
+    var origXHROpen = XMLHttpRequest.prototype.open;
+    var origXHRSend = XMLHttpRequest.prototype.send;
+    var origObjKeys = Object.keys;
+    var origObjGetOwnPropNames = Object.getOwnPropertyNames;
+
+    function safeStr(v) {
+      if (v === undefined) return 'undefined';
+      if (v === null) return 'null';
+      try {
+        var s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        return s.length > VALUE_CAP ? s.substring(0, VALUE_CAP) + '...[truncated]' : s;
+      } catch(e) { return '[unserializable]'; }
+    }
+
+    function getStack() {
+      try {
+        var e = new Error();
+        var stack = e.stack || '';
+        var lines = stack.split('\\n').slice(2, 5);
+        var cleaned = [];
+        for (var i = 0; i < lines.length; i++) {
+          var l = lines[i].trim();
+          if (l.indexOf('sentinel') === -1 && l.indexOf('addInitScript') === -1) {
+            cleaned.push(l);
+          }
+        }
+        return cleaned.join(' | ') || 'unknown';
+      } catch(e) { return 'unknown'; }
+    }
+
+    // ─── [C-INT-11] Core log function with direction field ───
+    function log(cat, api, detail, opts) {
+      opts = opts || {};
+      var evt = {
+        ts: Date.now(),
+        cat: cat,
+        api: api,
+        risk: opts.risk || 'medium',
+        val: safeStr(opts.val),
+        detail: (detail || '').substring(0, DETAIL_CAP),
+        src: opts.src || getStack(),
+        dir: opts.dir || 'call',
+        fid: opts.fid || 'main'
+      };
+      events.push(evt);
+      eventCounter++;
+
+      // [C-INT-10] Push telemetry
+      if (eventCounter % pushThreshold === 0 && typeof window.SENTINEL_PUSH === 'function') {
+        try {
+          window.SENTINEL_PUSH(JSON.stringify({ type: 'EVENTS', data: events.splice(0, events.length) }));
+        } catch(e) {}
+      }
+    }
+
+    // ─── Shield integration (optional graceful fallback) ───
+    var shield = window.__SENTINEL_SHIELD__ || null;
+
+    function hookFn(target, prop, cat, risk, opts) {
+      opts = opts || {};
+      try {
+        var original = target[prop];
+        if (typeof original !== 'function') return false;
+        var origStr;
+        try { origStr = realToString.call(original); } catch(e) { origStr = 'function ' + prop + '() { [native code] }'; }
+        var hooked = function() {
+          var val;
+          try { val = original.apply(this, arguments); } catch(e) { val = e.message; throw e; }
+          var argStr = '';
+          for (var i = 0; i < arguments.length && i < 3; i++) {
+            if (i > 0) argStr += ', ';
+            argStr += safeStr(arguments[i]);
+          }
+          log(cat, prop, (opts.why || prop) + '(' + argStr + ')', {
+            risk: risk, val: val, dir: opts.returnCapture ? 'response' : 'call'
+          });
+          return val;
+        };
+        if (shield) {
+          shield.hookFunction(target, prop, function(ctx, args) {
+            var argStr = '';
+            for (var i = 0; i < args.length && i < 3; i++) {
+              if (i > 0) argStr += ', ';
+              argStr += safeStr(args[i]);
+            }
+            log(cat, prop, (opts.why || prop) + '(' + argStr + ')', { risk: risk, dir: 'call' });
+          });
+        } else {
+          target[prop] = hooked;
+        }
+        return true;
+      } catch(e) { return false; }
+    }
+
+    function hookGetter(target, prop, cat, risk, opts) {
+      opts = opts || {};
+      try {
+        if (shield) {
+          return shield.hookGetter(target, prop, function(ctx, p, val) {
+            log(cat, p, (opts.why || p) + ' → ' + safeStr(val), { risk: risk, val: val, dir: 'response' });
+          });
+        }
+        var desc = realGetDesc.call(Object, target, prop);
+        if (!desc || !desc.get) return false;
+        var origGet = desc.get;
+        realDefProp(target, prop, {
+          get: function() {
+            var val = origGet.call(this);
+            log(cat, prop, (opts.why || prop) + ' → ' + safeStr(val), { risk: risk, val: val, dir: 'response' });
+            return val;
+          },
+          set: desc.set, enumerable: desc.enumerable, configurable: desc.configurable
+        });
+        return true;
+      } catch(e) { return false; }
+    }
+
+    // ─── [C-INT-01] smartHookGetter — prevents prototype shadow bug (v4.4.0 fatal) ───
+    function smartHookGetter(protoTarget, instanceTarget, prop, cat, risk, opts) {
+      var instanceDesc = realGetDesc.call(Object, instanceTarget, prop);
+      var protoDesc = realGetDesc.call(Object, protoTarget, prop);
+      if (instanceDesc && instanceDesc.get) {
+        return hookGetter(instanceTarget, prop, cat, risk, opts);
+      } else if (protoDesc && protoDesc.get) {
+        return hookGetter(protoTarget, prop, cat, risk, opts);
+      }
+      return false;
+    }
+
+    // ─── [C-INT-02] hookGetterSetter for cookie r/w ───
+    function hookGetterSetter(target, prop, cat, risk, getWhy, setWhy) {
+      try {
+        if (shield) {
+          return shield.hookGetterSetter(target, prop,
+            function(ctx, p, val) { log(cat, p + ' [read]', getWhy + ' → ' + safeStr(val), { risk: risk, val: val, dir: 'response' }); },
+            function(ctx, p, val) { log(cat, p + ' [write]', setWhy + ': ' + safeStr(val), { risk: 'high', val: val, dir: 'call' }); }
+          );
+        }
+        var desc = realGetDesc.call(Object, target, prop);
+        if (!desc) return false;
+        var origGet = desc.get;
+        var origSet = desc.set;
+        realDefProp(target, prop, {
+          get: function() {
+            var val = origGet ? origGet.call(this) : undefined;
+            log(cat, prop + ' [read]', getWhy + ' → ' + safeStr(val), { risk: risk, val: val, dir: 'response' });
+            return val;
+          },
+          set: function(v) {
+            log(cat, prop + ' [write]', setWhy + ': ' + safeStr(v), { risk: 'high', val: v, dir: 'call' });
+            if (origSet) origSet.call(this, v);
+          },
+          enumerable: desc.enumerable, configurable: desc.configurable
+        });
+        return true;
+      } catch(e) { return false; }
+    }
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 1: CANVAS FINGERPRINTING (#1 canvas) — HIGH
+    // ════════════════════════════════════════════════════
+    hookFn(HTMLCanvasElement.prototype, 'toDataURL', 'canvas', 'high', { why: 'Canvas fingerprint extraction' });
+    hookFn(HTMLCanvasElement.prototype, 'toBlob', 'canvas', 'high', { why: 'Canvas blob extraction' });
+    try { hookFn(HTMLCanvasElement.prototype, 'getContext', 'canvas', 'medium', { why: 'Canvas context creation' }); } catch(e) {}
+    try {
+      hookFn(CanvasRenderingContext2D.prototype, 'fillText', 'canvas', 'high', { why: 'Canvas text rendering' });
+      hookFn(CanvasRenderingContext2D.prototype, 'strokeText', 'canvas', 'high', { why: 'Canvas stroke text' });
+      hookFn(CanvasRenderingContext2D.prototype, 'getImageData', 'canvas', 'high', { why: 'Canvas pixel readback' });
+      hookFn(CanvasRenderingContext2D.prototype, 'isPointInPath', 'canvas', 'high', { why: 'Canvas point-in-path test' });
+      hookFn(CanvasRenderingContext2D.prototype, 'measureText', 'canvas', 'medium', { why: 'Canvas text measurement' });
+    } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 2: WEBGL FINGERPRINTING (#2 webgl) — HIGH
+    // ════════════════════════════════════════════════════
+    var webglProtos = [];
+    try { webglProtos.push(WebGLRenderingContext.prototype); } catch(e) {}
+    try { webglProtos.push(WebGL2RenderingContext.prototype); } catch(e) {}
+    for (var wi = 0; wi < webglProtos.length; wi++) {
+      var wgl = webglProtos[wi];
+      hookFn(wgl, 'getParameter', 'webgl', 'high', { why: 'WebGL parameter read', returnCapture: true });
+      hookFn(wgl, 'getExtension', 'webgl', 'high', { why: 'WebGL extension query' });
+      hookFn(wgl, 'getSupportedExtensions', 'webgl', 'high', { why: 'WebGL supported extensions list' });
+      hookFn(wgl, 'readPixels', 'webgl', 'high', { why: 'WebGL pixel readback' });
+      hookFn(wgl, 'getShaderPrecisionFormat', 'webgl', 'high', { why: 'WebGL shader precision' });
+      hookFn(wgl, 'createBuffer', 'webgl', 'low', { why: 'WebGL buffer creation' });
+    }
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 3: AUDIO FINGERPRINTING (#3 audio) — CRITICAL
+    // ════════════════════════════════════════════════════
+    try {
+      hookFn(OfflineAudioContext.prototype, 'startRendering', 'audio', 'critical', { why: 'Audio fingerprint rendering' });
+      hookFn(BaseAudioContext.prototype, 'createOscillator', 'audio', 'critical', { why: 'Audio oscillator creation' });
+      hookFn(BaseAudioContext.prototype, 'createDynamicsCompressor', 'audio', 'critical', { why: 'Audio compressor creation' });
+      hookFn(BaseAudioContext.prototype, 'createAnalyser', 'audio', 'high', { why: 'Audio analyser creation' });
+      hookFn(BaseAudioContext.prototype, 'createGain', 'audio', 'medium', { why: 'Audio gain node' });
+      hookGetter(AudioContext.prototype, 'baseLatency', 'audio', 'high', { why: 'Audio latency fingerprint' });
+    } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 4: FONT DETECTION (#4 font-detection) — CRITICAL
+    // ════════════════════════════════════════════════════
+    try {
+      var origGetBCR = Element.prototype.getBoundingClientRect;
+      Element.prototype.getBoundingClientRect = function() {
+        var result = origGetBCR.call(this);
+        var tag = (this.tagName || '').toLowerCase();
+        if (tag === 'span' || tag === 'div') {
+          var style = this.style || {};
+          if (style.fontFamily || this.getAttribute && this.getAttribute('style')) {
+            log('font-detection', 'getBoundingClientRect', 'Font width/height probe: ' + (style.fontFamily || ''), { risk: 'critical', val: result.width + 'x' + result.height, dir: 'response' });
+          }
+        }
+        return result;
+      };
+    } catch(e) {}
+    try { hookFn(document, 'fonts', 'font-detection', 'critical', { why: 'Document.fonts access' }); } catch(e) {}
+    try {
+      if (document.fonts && document.fonts.check) {
+        hookFn(document.fonts, 'check', 'font-detection', 'critical', { why: 'Font availability check' });
+      }
+    } catch(e) {}
+    try { hookFn(FontFace.prototype, 'load', 'font-detection', 'high', { why: 'FontFace load' }); } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 5: NAVIGATOR FINGERPRINTING (#5 fingerprint) — HIGH
+    //  [C-INT-01] smartHookGetter for ALL 19 navigator props
+    // ════════════════════════════════════════════════════
+    var navProps = [
+      'userAgent', 'vendor', 'platform', 'language', 'languages',
+      'hardwareConcurrency', 'deviceMemory', 'maxTouchPoints',
+      'plugins', 'mimeTypes', 'cookieEnabled', 'doNotTrack',
+      'appName', 'appVersion', 'product', 'productSub',
+      'vendorSub', 'oscpu', 'buildID'
+    ];
+    for (var ni = 0; ni < navProps.length; ni++) {
+      smartHookGetter(Navigator.prototype, navigator, navProps[ni], 'fingerprint', 'high', { why: 'navigator.' + navProps[ni] + ' fingerprint read' });
+    }
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 6: SCREEN PROPERTIES (#6 screen) — MEDIUM
+    // ════════════════════════════════════════════════════
+    var screenProps = ['width', 'height', 'availWidth', 'availHeight', 'colorDepth', 'pixelDepth'];
+    for (var si = 0; si < screenProps.length; si++) {
+      smartHookGetter(Screen.prototype, screen, screenProps[si], 'screen', 'medium', { why: 'screen.' + screenProps[si] + ' probe' });
+    }
+    hookGetter(window, 'devicePixelRatio', 'screen', 'medium', { why: 'window.devicePixelRatio probe' });
+    hookGetter(window, 'outerWidth', 'screen', 'medium', { why: 'window.outerWidth probe' });
+    hookGetter(window, 'outerHeight', 'screen', 'medium', { why: 'window.outerHeight probe' });
+    hookGetter(window, 'innerWidth', 'screen', 'low', { why: 'window.innerWidth probe' });
+    hookGetter(window, 'innerHeight', 'screen', 'low', { why: 'window.innerHeight probe' });
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 7: STORAGE (#7 storage) — MEDIUM
+    //  [C-INT-02] hookGetterSetter for cookie read + write
+    // ════════════════════════════════════════════════════
+    hookGetterSetter(Document.prototype, 'cookie', 'storage', 'medium',
+      'document.cookie read — tracking data access',
+      'document.cookie write — tracking cookie creation'
+    );
+    try { hookGetter(window, 'localStorage', 'storage', 'medium', { why: 'localStorage access' }); } catch(e) {}
+    try { hookGetter(window, 'sessionStorage', 'storage', 'medium', { why: 'sessionStorage access' }); } catch(e) {}
+    try { hookGetter(window, 'indexedDB', 'storage', 'medium', { why: 'IndexedDB access' }); } catch(e) {}
+    try { hookFn(window, 'openDatabase', 'storage', 'medium', { why: 'WebSQL openDatabase' }); } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 8: NETWORK (#8 network) — MEDIUM
+    //  [C-INT-06] Dual-log: both 'network' AND 'exfiltration'
+    // ════════════════════════════════════════════════════
+    window.fetch = function() {
+      var url = arguments[0];
+      if (typeof url === 'object' && url.url) url = url.url;
+      var method = (arguments[1] && arguments[1].method) || 'GET';
+      var body = (arguments[1] && arguments[1].body) ? safeStr(arguments[1].body) : '';
+      log('network', 'fetch', method + ' ' + safeStr(url), { risk: 'medium', dir: 'call' });
+      if (method === 'POST' || body) {
+        log('exfiltration', 'fetch', 'POST data: ' + body + ' → ' + safeStr(url), { risk: 'critical', dir: 'call' });
+      }
+      return origFetch.apply(this, arguments);
     };
 
-    // Shield is optional
-    var _shield = window.__SENTINEL_SHIELD__ || null;
-
-    // ── Logging with dedup ──
-    function log(category, api, detail, risk, opts) {
-      if (_sentinel.events.length >= _sentinel.config.maxEvents) return;
-      opts = opts || {};
-      var key = category + ':' + api;
-      _sentinel.counters[key] = (_sentinel.counters[key] || 0) + 1;
-      if (_sentinel.counters[key] > 500) { _sentinel.dedupCount++; return; }
-
-      var event = {
-        ts: Date.now() - _sentinel.startTime,
-        cat: category,
-        api: api,
-        detail: (typeof detail === 'object') ? JSON.stringify(detail).slice(0, 500) : String(detail || '').slice(0, 500),
-        risk: risk || 'low',
-        dir: opts.returnValue !== undefined ? 'response' : 'call',
-        origin: (function() { try { return location.origin; } catch(e) { return 'unknown'; } })(),
-        frame: _sentinel.frameId
-      };
-      if (opts.returnValue !== undefined) {
-        try { event.value = JSON.stringify(opts.returnValue).slice(0, 500); } catch(e) { event.value = String(opts.returnValue).slice(0, 500); }
+    XMLHttpRequest.prototype.open = function(method, url) {
+      this.__sentinel_method = method;
+      this.__sentinel_url = url;
+      log('network', 'XMLHttpRequest.open', method + ' ' + safeStr(url), { risk: 'medium', dir: 'call' });
+      return origXHROpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(body) {
+      if (body) {
+        log('exfiltration', 'XMLHttpRequest.send', 'XHR data: ' + safeStr(body) + ' → ' + safeStr(this.__sentinel_url), { risk: 'critical', dir: 'call' });
       }
-      if (opts.why) event.why = opts.why;
-      try {
-        if (_sentinel.events.length % _sentinel.config.stackSampleRate === 0) {
-          event.stack = (new Error()).stack ? (new Error()).stack.split('\\n').slice(2, 6).join(' | ').slice(0, 300) : '';
-        }
-      } catch(e) {}
+      return origXHRSend.apply(this, arguments);
+    };
 
-      _sentinel.events.push(event);
-    }
-
-    // ═══ HELPER: hookFn — hooks a FUNCTION on target ═══
-    function hookFn(obj, prop, cat, risk, options) {
-      if (!obj || typeof obj[prop] !== 'function') return;
-      var opts = options || {};
-      try {
-        if (_shield) {
-          _shield.hookFunction(obj, prop, function(original) {
-            var args = [];
-            for (var i = 1; i < arguments.length; i++) args.push(arguments[i]);
-            var result;
-            try { result = original.apply(this, args); } catch(e) { throw e; }
-            var detail = opts.detailFn ? opts.detailFn(args, this) : args[0];
-            var logOpts = { why: opts.why || '' };
-            if (opts.valueFn) { try { logOpts.returnValue = opts.valueFn(result); } catch(e) {} }
-            else if (opts.captureReturn) { logOpts.returnValue = result; }
-            log(cat, prop, detail, risk, logOpts);
-            return result;
-          });
-        } else {
-          var orig = obj[prop];
-          var replacement = function() {
-            var args = [];
-            for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
-            var result;
-            try { result = orig.apply(this, args); } catch(e) { throw e; }
-            var detail = opts.detailFn ? opts.detailFn(args, this) : args[0];
-            var logOpts = { why: opts.why || '' };
-            if (opts.valueFn) { try { logOpts.returnValue = opts.valueFn(result); } catch(e) {} }
-            else if (opts.captureReturn) { logOpts.returnValue = result; }
-            log(cat, prop, detail, risk, logOpts);
-            return result;
-          };
-          try { replacement.toString = function() { return _realToString.call(orig); }; } catch(e) {}
-          obj[prop] = replacement;
-        }
-      } catch(e) {}
-    }
-
-    // ═══ HELPER: hookGetter — hooks a GETTER on target ═══
-    function hookGetter(target, prop, category, risk, options) {
-      var opts = options || {};
-      try {
-        if (_shield && _shield.hookGetter) {
-          _shield.hookGetter(target, prop, function(originalGetter) {
-            var value = originalGetter.call(this);
-            log(category, prop, opts.detail || prop, risk, {
-              returnValue: opts.valueFn ? opts.valueFn(value) : value,
-              why: opts.why || ''
-            });
-            return value;
-          });
-        } else {
-          var desc = _realGetDesc.call(Object, target, prop);
-          if (!desc || !desc.get) return;
-          var origGetter = desc.get;
-          _realDefProp.call(Object, target, prop, {
-            get: function() {
-              var value = origGetter.call(this);
-              log(category, prop, opts.detail || prop, risk, {
-                returnValue: opts.valueFn ? opts.valueFn(value) : value,
-                why: opts.why || ''
-              });
-              return value;
-            },
-            set: desc.set,
-            enumerable: desc.enumerable,
-            configurable: true
-          });
-        }
-      } catch(e) {}
-    }
-
-    // ═══ HELPER: hookGetterSetter — hooks BOTH getter AND setter ═══
-    function hookGetterSetter(target, prop, cat, risk, getOpts, setOpts) {
-      try {
-        if (_shield && _shield.hookGetterSetter) {
-          _shield.hookGetterSetter(target, prop,
-            function(origGet) {
-              var val = origGet.call(this);
-              log(cat, prop + '.get', (getOpts && getOpts.detail) || prop, risk, {
-                returnValue: val, why: (getOpts && getOpts.why) || ''
-              });
-              return val;
-            },
-            function(origSet, v) {
-              log(cat, prop + '.set', { preview: String(v).slice(0, 80) }, setOpts ? (setOpts.risk || risk) : risk, {
-                why: (setOpts && setOpts.why) || ''
-              });
-              return origSet.call(this, v);
-            }
-          );
-        } else {
-          var desc = _realGetDesc.call(Object, target, prop);
-          if (!desc) return;
-          var newDesc = { enumerable: desc.enumerable, configurable: true };
-          if (desc.get) {
-            var origGet = desc.get;
-            newDesc.get = function() {
-              var val = origGet.call(this);
-              log(cat, prop + '.get', (getOpts && getOpts.detail) || prop, risk, {
-                returnValue: val, why: (getOpts && getOpts.why) || ''
-              });
-              return val;
-            };
-          }
-          if (desc.set) {
-            var origSet = desc.set;
-            newDesc.set = function(v) {
-              log(cat, prop + '.set', { preview: String(v).slice(0, 80) }, setOpts ? (setOpts.risk || risk) : risk, {
-                why: (setOpts && setOpts.why) || ''
-              });
-              return origSet.call(this, v);
-            };
-          }
-          _realDefProp.call(Object, target, prop, newDesc);
-        }
-      } catch(e) {}
-    }
-
-    // ═══ HELPER: smartHookGetter — v4.1's approach: find WHERE getter lives, hook THAT ═══
-    // This is the KEY FIX: if stealth patched navigator instance, we hook the instance.
-    // If no instance patch exists, we hook the prototype.
-    function smartHookGetter(protoTarget, instanceTarget, prop, cat, risk, opts) {
-      try {
-        // Check instance first (stealth may have patched it)
-        var instanceDesc = _realGetDesc.call(Object, instanceTarget, prop);
-        var protoDesc = _realGetDesc.call(Object, protoTarget, prop);
-
-        if (instanceDesc && instanceDesc.get) {
-          // Instance has a getter (likely patched by stealth) — hook the INSTANCE
-          hookGetter(instanceTarget, prop, cat, risk, opts);
-        } else if (protoDesc && protoDesc.get) {
-          // Only prototype has a getter — hook the prototype
-          hookGetter(protoTarget, prop, cat, risk, opts);
-        }
-        // If neither has a getter, property might be a data property — skip
-      } catch(e) {}
-    }
-
-    // ═══════════════════════════════════════
-    //  BOOT_OK — proves injection is running
-    // ═══════════════════════════════════════
-    _sentinel.bootOk = true;
-    log('system', 'BOOT_OK', {
-      frameId: _sentinel.frameId,
-      isTop: (function() { try { return window === window.top; } catch(e) { return false; } })(),
-      url: (function() { try { return location.href; } catch(e) { return 'unknown'; } })()
-    }, 'info', { why: 'Injection confirmed — hooks activating' });
-
-    // ═══ 1. CANVAS FINGERPRINTING ═══
     try {
-      hookFn(HTMLCanvasElement.prototype, 'toDataURL', 'canvas', 'high', {
-        detailFn: function(a) { return { type: a[0] || 'image/png' }; },
-        captureReturn: true,
-        valueFn: function(r) { return r ? r.slice(0, 80) : ''; },
-        why: 'Canvas toDataURL — pixel-level fingerprinting'
-      });
-      hookFn(HTMLCanvasElement.prototype, 'toBlob', 'canvas', 'high', {
-        detailFn: function(a) { return { type: a[1] || 'image/png' }; },
-        why: 'Canvas toBlob — binary fingerprint extraction'
-      });
-      hookFn(CanvasRenderingContext2D.prototype, 'fillText', 'canvas', 'medium', {
-        detailFn: function(a, ctx) { return { text: String(a[0]).slice(0, 50), font: ctx.font }; },
-        why: 'Canvas fillText — text rendering fingerprint'
-      });
-      hookFn(CanvasRenderingContext2D.prototype, 'strokeText', 'canvas', 'medium', {
-        detailFn: function(a, ctx) { return { text: String(a[0]).slice(0, 50), font: ctx.font }; },
-        why: 'Canvas strokeText — text rendering fingerprint'
-      });
-      hookFn(CanvasRenderingContext2D.prototype, 'getImageData', 'canvas', 'high', {
-        detailFn: function(a) { return { x: a[0], y: a[1], w: a[2], h: a[3] }; },
-        why: 'Canvas getImageData — pixel data extraction'
-      });
-      hookFn(CanvasRenderingContext2D.prototype, 'measureText', 'font-detection', 'medium', {
-        detailFn: function(a, ctx) { return { text: String(a[0]).slice(0, 30), font: ctx.font }; },
-        captureReturn: true,
-        valueFn: function(r) { return r ? { width: r.width } : null; },
-        why: 'measureText — font availability fingerprinting'
-      });
-      hookFn(CanvasRenderingContext2D.prototype, 'isPointInPath', 'canvas', 'medium', {
-        why: 'isPointInPath — canvas geometry fingerprint'
-      });
-      hookFn(CanvasRenderingContext2D.prototype, 'isPointInStroke', 'canvas', 'medium', {
-        why: 'isPointInStroke — canvas geometry fingerprint'
-      });
-      hookFn(HTMLCanvasElement.prototype, 'getContext', 'canvas', 'medium', {
-        detailFn: function(a) { return { contextType: a[0] }; },
-        why: 'Canvas getContext — context type probe'
-      });
-    } catch(e) {}
-
-    // ═══ 2. WEBGL FINGERPRINTING ═══
-    try {
-      function hookWebGLProto(proto, label) {
-        hookFn(proto, 'getParameter', 'webgl', 'high', {
-          detailFn: function(a) { return { param: a[0], ctx: label }; },
-          captureReturn: true,
-          valueFn: function(r) { return typeof r === 'string' ? r : String(r).slice(0, 100); },
-          why: 'WebGL getParameter — GPU/renderer fingerprinting'
-        });
-        hookFn(proto, 'getExtension', 'webgl', 'medium', {
-          detailFn: function(a) { return { ext: a[0], ctx: label }; },
-          why: 'WebGL getExtension — capability fingerprinting'
-        });
-        hookFn(proto, 'getSupportedExtensions', 'webgl', 'medium', {
-          captureReturn: true,
-          valueFn: function(r) { return r ? { count: r.length } : null; },
-          why: 'WebGL extensions list — GPU capability fingerprint'
-        });
-        if (proto.getShaderPrecisionFormat) {
-          hookFn(proto, 'getShaderPrecisionFormat', 'webgl', 'high', {
-            detailFn: function(a) { return { shaderType: a[0], precisionType: a[1] }; },
-            why: 'WebGL shader precision — GPU fingerprint vector'
-          });
-        }
-        hookFn(proto, 'getContextAttributes', 'webgl', 'low', {
-          captureReturn: true,
-          why: 'WebGL context attributes'
-        });
-        if (proto.readPixels) {
-          hookFn(proto, 'readPixels', 'webgl', 'high', {
-            detailFn: function(a) { return { x: a[0], y: a[1], w: a[2], h: a[3] }; },
-            why: 'WebGL readPixels — GPU-rendered fingerprint extraction'
-          });
-        }
-      }
-      if (typeof WebGLRenderingContext !== 'undefined') hookWebGLProto(WebGLRenderingContext.prototype, 'webgl');
-      if (typeof WebGL2RenderingContext !== 'undefined') hookWebGLProto(WebGL2RenderingContext.prototype, 'webgl2');
-    } catch(e) {}
-
-    // ═══ 3. AUDIO FINGERPRINTING ═══
-    try {
-      if (typeof AudioContext !== 'undefined') {
-        hookFn(AudioContext.prototype, 'createOscillator', 'audio', 'high', { why: 'Oscillator — audio fingerprint' });
-        hookFn(AudioContext.prototype, 'createDynamicsCompressor', 'audio', 'high', { why: 'Compressor — audio fingerprint' });
-        if (AudioContext.prototype.createAnalyser) hookFn(AudioContext.prototype, 'createAnalyser', 'audio', 'medium', { why: 'Analyser — frequency data' });
-        if (AudioContext.prototype.createGain) hookFn(AudioContext.prototype, 'createGain', 'audio', 'low', { why: 'Gain node — audio pipeline' });
-        if (AudioContext.prototype.createScriptProcessor) hookFn(AudioContext.prototype, 'createScriptProcessor', 'audio', 'medium', { why: 'Script processor — raw audio' });
-
-        // baseLatency getter
-        try {
-          var blDesc = _realGetDesc.call(Object, AudioContext.prototype, 'baseLatency');
-          if (blDesc && blDesc.get) {
-            hookGetter(AudioContext.prototype, 'baseLatency', 'audio', 'medium', { why: 'Audio base latency — FPjs entropy source' });
-          }
-        } catch(e) {}
-
-        // sampleRate getter — find correct target
-        try {
-          var srDesc = _realGetDesc.call(Object, AudioContext.prototype, 'sampleRate') ||
-                       _realGetDesc.call(Object, BaseAudioContext.prototype, 'sampleRate');
-          var srTarget = _realGetDesc.call(Object, AudioContext.prototype, 'sampleRate') ? AudioContext.prototype : 
-                         (typeof BaseAudioContext !== 'undefined' ? BaseAudioContext.prototype : null);
-          if (srTarget && srDesc && srDesc.get) {
-            hookGetter(srTarget, 'sampleRate', 'audio', 'medium', { why: 'Audio sample rate — varies by hardware' });
-          }
-        } catch(e) {}
-      }
-      if (typeof OfflineAudioContext !== 'undefined') {
-        hookFn(OfflineAudioContext.prototype, 'startRendering', 'audio', 'critical', { why: 'Offline audio rendering — generates fingerprint hash' });
-        if (OfflineAudioContext.prototype.createOscillator) hookFn(OfflineAudioContext.prototype, 'createOscillator', 'audio', 'high', { why: 'Offline oscillator' });
-        if (OfflineAudioContext.prototype.createDynamicsCompressor) hookFn(OfflineAudioContext.prototype, 'createDynamicsCompressor', 'audio', 'high', { why: 'Offline compressor' });
+      var origES = window.EventSource;
+      if (origES) {
+        window.EventSource = function(url, opts) {
+          log('network', 'EventSource', 'SSE connection: ' + safeStr(url), { risk: 'medium', dir: 'call' });
+          return new origES(url, opts);
+        };
       }
     } catch(e) {}
 
-    // ═══ 4. FONT DETECTION ═══
-    try {
-      hookFn(Element.prototype, 'getBoundingClientRect', 'font-detection', 'low', {
-        captureReturn: true,
-        valueFn: function(r) { return r ? { w: r.width, h: r.height } : null; },
-        why: 'getBoundingClientRect — element dimension fingerprinting'
-      });
-    } catch(e) {}
 
-    try {
-      if (typeof FontFace !== 'undefined') {
-        hookFn(window, 'FontFace', 'font-detection', 'medium', {
-          why: 'FontFace constructor — dynamic font loading probe'
-        });
+    // ════════════════════════════════════════════════════
+    //  SECTION 9: PERFORMANCE TIMING (#9 perf-timing) — MEDIUM
+    // ════════════════════════════════════════════════════
+    hookFn(Performance.prototype, 'now', 'perf-timing', 'medium', { why: 'High-precision timer', returnCapture: true });
+    try { hookFn(Performance.prototype, 'mark', 'perf-timing', 'medium', { why: 'Performance mark' }); } catch(e) {}
+    try { hookFn(Performance.prototype, 'measure', 'perf-timing', 'medium', { why: 'Performance measure' }); } catch(e) {}
+    try { hookFn(Performance.prototype, 'getEntriesByType', 'perf-timing', 'medium', { why: 'Performance entries query' }); } catch(e) {}
+    try { hookFn(Performance.prototype, 'getEntriesByName', 'perf-timing', 'medium', { why: 'Performance entries by name' }); } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 10: MEDIA DEVICES (#10 media-devices) — CRITICAL
+    // ════════════════════════════════════════════════════
+    try { hookFn(MediaDevices.prototype, 'enumerateDevices', 'media-devices', 'critical', { why: 'Device enumeration fingerprint' }); } catch(e) {}
+    try { hookFn(MediaDevices.prototype, 'getUserMedia', 'media-devices', 'critical', { why: 'Camera/mic access request' }); } catch(e) {}
+    try { hookFn(MediaDevices.prototype, 'getDisplayMedia', 'media-devices', 'critical', { why: 'Screen capture request' }); } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 11: DOM PROBING (#11 dom-probe) — MEDIUM
+    //  [C-INT-04] Filtered createElement — FP tags only
+    // ════════════════════════════════════════════════════
+    var origCreateElement = document.createElement;
+    var fpTags = ['canvas','iframe','audio','video','object','embed','script','link','img'];
+    document.createElement = function(tag) {
+      var result = origCreateElement.apply(this, arguments);
+      var lTag = (tag || '').toLowerCase();
+      if (fpTags.indexOf(lTag) >= 0) {
+        log('dom-probe', 'createElement', 'tag: ' + lTag, { risk: 'medium', dir: 'call' });
       }
-    } catch(e) {}
+      return result;
+    };
+    try { hookFn(window, 'MutationObserver', 'dom-probe', 'medium', { why: 'DOM mutation observer creation' }); } catch(e) {}
+    try { hookFn(window, 'IntersectionObserver', 'dom-probe', 'medium', { why: 'Intersection observer creation' }); } catch(e) {}
 
-    // ═══ 5. NAVIGATOR / FINGERPRINT — SMART TARGET DETECTION (v4.1 approach) ═══
-    // KEY FIX: If stealth patched navigator at instance level,
-    // we hook the INSTANCE, not the prototype. This wraps the stealth patch
-    // with our monitoring layer, so we see every access.
-    try {
-      var _navProps = [
-        { prop: 'userAgent', risk: 'high', why: 'navigator.userAgent — browser identification' },
-        { prop: 'platform', risk: 'high', why: 'navigator.platform — OS identification' },
-        { prop: 'language', risk: 'medium', why: 'navigator.language — locale fingerprint' },
-        { prop: 'languages', risk: 'high', why: 'navigator.languages — locale array fingerprint' },
-        { prop: 'hardwareConcurrency', risk: 'high', why: 'navigator.hardwareConcurrency — CPU core count' },
-        { prop: 'deviceMemory', risk: 'high', why: 'navigator.deviceMemory — RAM size' },
-        { prop: 'maxTouchPoints', risk: 'medium', why: 'navigator.maxTouchPoints — device type' },
-        { prop: 'vendor', risk: 'low', why: 'navigator.vendor — browser vendor' },
-        { prop: 'appVersion', risk: 'low', why: 'navigator.appVersion — browser version' },
-        { prop: 'doNotTrack', risk: 'low', why: 'navigator.doNotTrack — DNT preference (ironic fingerprint)' },
-        { prop: 'webdriver', risk: 'critical', why: 'navigator.webdriver — automation detection flag' },
-        { prop: 'pdfViewerEnabled', risk: 'low', why: 'navigator.pdfViewerEnabled — FPjs v5 source' },
-        { prop: 'cookieEnabled', risk: 'low', why: 'navigator.cookieEnabled — cookie support check' },
-        { prop: 'plugins', risk: 'high', why: 'navigator.plugins — plugin list fingerprint' },
-        { prop: 'mimeTypes', risk: 'medium', why: 'navigator.mimeTypes — MIME type fingerprint' },
-        { prop: 'connection', risk: 'medium', why: 'navigator.connection — network info fingerprint' },
-        { prop: 'oscpu', risk: 'medium', why: 'navigator.oscpu — OS/CPU info' },
-        { prop: 'product', risk: 'low', why: 'navigator.product — always Gecko' },
-        { prop: 'productSub', risk: 'low', why: 'navigator.productSub — build date' }
-      ];
-      _navProps.forEach(function(np) {
-        try {
-          smartHookGetter(Navigator.prototype, navigator, np.prop, 'fingerprint', np.risk, { why: np.why });
-        } catch(e) {}
-      });
-    } catch(e) {}
 
-    // ═══ 6. PERMISSIONS API ═══
-    try {
-      if (navigator.permissions && navigator.permissions.query) {
-        hookFn(navigator.permissions, 'query', 'permissions', 'high', {
-          detailFn: function(a) { return { name: a[0] ? a[0].name : 'unknown' }; },
-          why: 'Permission state probing for fingerprint consistency'
-        });
-      }
-    } catch(e) {}
-
-    // ═══ 7. STORAGE — Cookie (getter + setter), localStorage, sessionStorage, indexedDB ═══
-    try {
-      // Cookie — BOTH getter AND setter (v4.4 only hooked getter!)
-      hookGetterSetter(Document.prototype, 'cookie', 'storage', 'medium',
-        { why: 'document.cookie read — tracking data access' },
-        { risk: 'high', why: 'document.cookie write — tracking cookie creation' }
-      );
-    } catch(e) {}
-
-    try {
-      hookFn(Storage.prototype, 'getItem', 'storage', 'low', {
-        detailFn: function(a) { return { key: String(a[0]).slice(0, 50) }; },
-        captureReturn: true,
-        why: 'Storage.getItem — stored data access'
-      });
-      hookFn(Storage.prototype, 'setItem', 'storage', 'medium', {
-        detailFn: function(a) { return { key: String(a[0]).slice(0, 50), size: a[1] ? String(a[1]).length : 0 }; },
-        why: 'Storage.setItem — data persistence'
-      });
-    } catch(e) {}
-
-    try {
-      if (typeof indexedDB !== 'undefined' && IDBFactory.prototype.open) {
-        hookFn(IDBFactory.prototype, 'open', 'storage', 'medium', {
-          detailFn: function(a) { return { dbName: a[0], version: a[1] }; },
-          why: 'IndexedDB.open — persistent storage fingerprint'
-        });
-      }
-    } catch(e) {}
-
-    // ═══ 8. SCREEN / DISPLAY — Smart target detection ═══
-    try {
-      var _screenProps = ['width', 'height', 'availWidth', 'availHeight', 'colorDepth', 'pixelDepth'];
-      _screenProps.forEach(function(prop) {
-        try {
-          smartHookGetter(Screen.prototype, screen, prop, 'screen', 'medium', { why: 'screen.' + prop + ' — display fingerprint' });
-        } catch(e) {}
-      });
-    } catch(e) {}
-
-    try {
-      // devicePixelRatio — find correct target
-      var dprDesc = _realGetDesc.call(Object, window, 'devicePixelRatio') ||
-                    _realGetDesc.call(Object, Window.prototype, 'devicePixelRatio');
-      var dprTarget = _realGetDesc.call(Object, window, 'devicePixelRatio') ? window : Window.prototype;
-      if (dprDesc && dprDesc.get) {
-        hookGetter(dprTarget, 'devicePixelRatio', 'screen', 'medium', { why: 'Device pixel ratio — display density fingerprint' });
-      }
-    } catch(e) {}
-
-    try {
-      hookFn(window, 'matchMedia', 'css-fingerprint', 'medium', {
-        detailFn: function(a) { return { query: a[0] }; },
-        why: 'matchMedia — CSS media query fingerprinting'
-      });
-    } catch(e) {}
-
-    // ═══ 9. PERFORMANCE TIMING ═══
-    try {
-      hookFn(Performance.prototype, 'getEntries', 'perf-timing', 'medium', {
-        captureReturn: true,
-        valueFn: function(r) { return { count: r ? r.length : 0 }; },
-        why: 'Performance entries — timing fingerprint'
-      });
-      hookFn(Performance.prototype, 'getEntriesByType', 'perf-timing', 'medium', {
-        detailFn: function(a) { return { type: a[0] }; },
-        captureReturn: true,
-        valueFn: function(r) { return { count: r ? r.length : 0 }; },
-        why: 'Performance entries by type — resource timing'
-      });
-    } catch(e) {}
-
-    // ═══ 10. MEDIA DEVICES ═══
-    try {
-      if (navigator.mediaDevices) {
-        hookFn(navigator.mediaDevices, 'enumerateDevices', 'media-devices', 'high', {
-          captureReturn: true,
-          valueFn: function(r) { return r && r.then ? 'Promise' : (r ? { count: r.length } : null); },
-          why: 'Media device enumeration — hardware fingerprint'
-        });
-      }
-    } catch(e) {}
-
-    // ═══ 11. DOM PROBING — filtered to fingerprint-relevant tags (v4.1 approach) ═══
-    try {
-      var origCreateElement = document.createElement.bind(document);
-      document.createElement = function(tag) {
-        var lTag = tag ? tag.toLowerCase() : '';
-        if (['canvas', 'iframe', 'audio', 'video', 'object', 'embed', 'script', 'link', 'img'].indexOf(lTag) >= 0) {
-          log('dom-probe', 'createElement', { tag: lTag }, lTag === 'canvas' ? 'high' : 'medium', {
-            why: 'Dynamic element creation — ' + lTag + ' for fingerprinting'
-          });
-        }
-        return origCreateElement.apply(document, arguments);
-      };
-      try { document.createElement.toString = function() { return 'function createElement() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
-
-    try {
-      hookFn(Element.prototype, 'getBoundingClientRect', 'dom-probe', 'medium', {
-        captureReturn: true,
-        valueFn: function(r) { return r ? { w: r.width, h: r.height } : null; },
-        why: 'getBoundingClientRect — element dimension fingerprinting'
-      });
-    } catch(e) {}
-
-    // offsetWidth/offsetHeight — commonly used for font detection
-    try {
-      var owDesc = _realGetDesc.call(Object, HTMLElement.prototype, 'offsetWidth');
-      if (owDesc && owDesc.get) {
-        hookGetter(HTMLElement.prototype, 'offsetWidth', 'font-detection', 'low', { why: 'offsetWidth — font availability detection' });
-      }
-    } catch(e) {}
-    try {
-      var ohDesc = _realGetDesc.call(Object, HTMLElement.prototype, 'offsetHeight');
-      if (ohDesc && ohDesc.get) {
-        hookGetter(HTMLElement.prototype, 'offsetHeight', 'font-detection', 'low', { why: 'offsetHeight — font availability detection' });
-      }
-    } catch(e) {}
-
-    // ═══ 12. CLIPBOARD ═══
+    // ════════════════════════════════════════════════════
+    //  SECTION 12: CLIPBOARD (#12 clipboard) — CRITICAL
+    // ════════════════════════════════════════════════════
     try {
       if (navigator.clipboard) {
-        if (navigator.clipboard.readText) {
-          hookFn(navigator.clipboard, 'readText', 'clipboard', 'critical', { why: 'Clipboard read — data exfiltration risk' });
-        }
-        if (navigator.clipboard.writeText) {
-          hookFn(navigator.clipboard, 'writeText', 'clipboard', 'high', { why: 'Clipboard write — data injection' });
-        }
+        hookFn(navigator.clipboard, 'readText', 'clipboard', 'critical', { why: 'Clipboard read' });
+        hookFn(navigator.clipboard, 'writeText', 'clipboard', 'critical', { why: 'Clipboard write' });
+        hookFn(navigator.clipboard, 'read', 'clipboard', 'critical', { why: 'Clipboard read binary' });
+        hookFn(navigator.clipboard, 'write', 'clipboard', 'critical', { why: 'Clipboard write binary' });
       }
     } catch(e) {}
 
-    // ═══ 13. GEOLOCATION ═══
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 13: GEOLOCATION (#13 geolocation) — CRITICAL
+    // ════════════════════════════════════════════════════
     try {
-      if (navigator.geolocation) {
-        hookFn(navigator.geolocation, 'getCurrentPosition', 'geolocation', 'critical', { why: 'Geolocation access — precise location' });
-        hookFn(navigator.geolocation, 'watchPosition', 'geolocation', 'critical', { why: 'Geolocation watch — continuous tracking' });
-      }
+      hookFn(Geolocation.prototype, 'getCurrentPosition', 'geolocation', 'critical', { why: 'Location access' });
+      hookFn(Geolocation.prototype, 'watchPosition', 'geolocation', 'critical', { why: 'Location tracking' });
     } catch(e) {}
 
-    // ═══ 14. SERVICE WORKER ═══
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 14: SERVICE WORKER (#14 service-worker) — HIGH
+    // ════════════════════════════════════════════════════
     try {
-      if (navigator.serviceWorker && navigator.serviceWorker.register) {
-        hookFn(navigator.serviceWorker, 'register', 'service-worker', 'high', {
-          detailFn: function(a) { return { url: String(a[0]).slice(0, 100) }; },
-          why: 'Service Worker registration — persistent background access'
+      hookFn(ServiceWorkerContainer.prototype, 'register', 'service-worker', 'high', { why: 'SW registration' });
+      hookFn(ServiceWorkerContainer.prototype, 'getRegistration', 'service-worker', 'high', { why: 'SW get registration' });
+    } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 15: HARDWARE (#15 hardware) — HIGH
+    // ════════════════════════════════════════════════════
+    try { hookFn(Navigator.prototype, 'getGamepads', 'hardware', 'high', { why: 'Gamepad enumeration' }); } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 16: EXFILTRATION (#16 exfiltration) — CRITICAL
+    // ════════════════════════════════════════════════════
+    try { hookFn(Navigator.prototype, 'sendBeacon', 'exfiltration', 'critical', { why: 'Beacon data exfiltration' }); } catch(e) {}
+    var origWS = window.WebSocket;
+    try {
+      window.WebSocket = function(url, protocols) {
+        log('exfiltration', 'WebSocket', 'WS connection: ' + safeStr(url), { risk: 'critical', dir: 'call' });
+        if (protocols) return new origWS(url, protocols);
+        return new origWS(url);
+      };
+      window.WebSocket.prototype = origWS.prototype;
+      window.WebSocket.CONNECTING = origWS.CONNECTING;
+      window.WebSocket.OPEN = origWS.OPEN;
+      window.WebSocket.CLOSING = origWS.CLOSING;
+      window.WebSocket.CLOSED = origWS.CLOSED;
+    } catch(e) {}
+    try {
+      var origImgSrc = realGetDesc.call(Object, HTMLImageElement.prototype, 'src');
+      if (origImgSrc && origImgSrc.set) {
+        var origImgSet = origImgSrc.set;
+        realDefProp(HTMLImageElement.prototype, 'src', {
+          set: function(v) {
+            if (v && typeof v === 'string' && (v.indexOf('http') === 0 || v.indexOf('//') === 0)) {
+              log('exfiltration', 'Image.src', 'Image beacon: ' + safeStr(v), { risk: 'high', dir: 'call' });
+            }
+            return origImgSet.call(this, v);
+          },
+          get: origImgSrc.get, enumerable: true, configurable: true
         });
       }
     } catch(e) {}
 
-    // ═══ 15. HARDWARE ═══
-    try {
-      if (navigator.getBattery) {
-        hookFn(navigator, 'getBattery', 'hardware', 'medium', { why: 'Battery API — power state fingerprint' });
-      }
-      if (navigator.getGamepads) {
-        hookFn(navigator, 'getGamepads', 'hardware', 'medium', { why: 'Gamepad API — controller fingerprint' });
-      }
-    } catch(e) {}
 
+    // ════════════════════════════════════════════════════
+    //  SECTION 17: WEBRTC (#17 webrtc) — CRITICAL
+    // ════════════════════════════════════════════════════
+    var origRTC = window.RTCPeerConnection;
     try {
-      smartHookGetter(Navigator.prototype, navigator, 'hardwareConcurrency', 'hardware', 'medium', { why: 'CPU core count' });
-      smartHookGetter(Navigator.prototype, navigator, 'deviceMemory', 'hardware', 'medium', { why: 'RAM amount' });
-    } catch(e) {}
-
-    // ═══ 16. NETWORK / EXFILTRATION MONITORING ═══
-    try {
-      var _origFetch = window.fetch;
-      if (_origFetch) {
-        window.fetch = function() {
-          var url = arguments[0];
-          var urlStr = typeof url === 'string' ? url : (url && url.url ? url.url : String(url));
-          var method = (arguments[1] && arguments[1].method) || 'GET';
-          var hasBody = !!(arguments[1] && arguments[1].body);
-          log('exfiltration', 'fetch', { url: urlStr.slice(0, 200), method: method, hasBody: hasBody }, 
-              hasBody ? 'high' : 'medium', { why: 'Fetch request — potential data exfiltration' });
-          return _origFetch.apply(window, arguments);
+      window.RTCPeerConnection = function(config) {
+        log('webrtc', 'RTCPeerConnection', 'ICE config: ' + safeStr(config), { risk: 'critical', dir: 'call' });
+        var pc = new origRTC(config);
+        var origCreateDC = pc.createDataChannel;
+        pc.createDataChannel = function() {
+          log('webrtc', 'createDataChannel', 'Data channel created', { risk: 'critical', dir: 'call' });
+          return origCreateDC.apply(this, arguments);
         };
-        try { window.fetch.toString = function() { return 'function fetch() { [native code] }'; }; } catch(e) {}
-      }
-    } catch(e) {}
-
-    try {
-      var _origXHROpen = XMLHttpRequest.prototype.open;
-      XMLHttpRequest.prototype.open = function(method, url) {
-        this.__sentinel_url = String(url).slice(0, 200);
-        this.__sentinel_method = method;
-        return _origXHROpen.apply(this, arguments);
-      };
-      var _origXHRSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.send = function(data) {
-        log('exfiltration', 'XMLHttpRequest', {
-          url: this.__sentinel_url || '', method: this.__sentinel_method || 'GET', hasData: !!data
-        }, data ? 'high' : 'medium', { why: 'XHR request — potential data exfiltration' });
-        return _origXHRSend.apply(this, arguments);
-      };
-      try { XMLHttpRequest.prototype.open.toString = function() { return 'function open() { [native code] }'; }; } catch(e) {}
-      try { XMLHttpRequest.prototype.send.toString = function() { return 'function send() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
-
-    try {
-      if (navigator.sendBeacon) {
-        var _origBeacon = navigator.sendBeacon.bind(navigator);
-        navigator.sendBeacon = function(url, data) {
-          log('exfiltration', 'sendBeacon', { url: String(url).slice(0, 200), dataSize: data ? String(data).length : 0 },
-              'critical', { why: 'sendBeacon — fire-and-forget exfiltration' });
-          return _origBeacon.apply(navigator, arguments);
-        };
-        try { navigator.sendBeacon.toString = function() { return 'function sendBeacon() { [native code] }'; }; } catch(e) {}
-      }
-    } catch(e) {}
-
-    // WebSocket monitoring
-    try {
-      if (typeof WebSocket !== 'undefined') {
-        var _OrigWS = WebSocket;
-        window.WebSocket = function(url, protocols) {
-          log('exfiltration', 'WebSocket', { url: String(url).slice(0, 200) }, 'high', {
-            why: 'WebSocket — persistent bidirectional data channel'
-          });
-          return new _OrigWS(url, protocols);
-        };
-        window.WebSocket.prototype = _OrigWS.prototype;
-        window.WebSocket.CONNECTING = _OrigWS.CONNECTING;
-        window.WebSocket.OPEN = _OrigWS.OPEN;
-        window.WebSocket.CLOSING = _OrigWS.CLOSING;
-        window.WebSocket.CLOSED = _OrigWS.CLOSED;
-        try { window.WebSocket.toString = function() { return 'function WebSocket() { [native code] }'; }; } catch(e) {}
-      }
-    } catch(e) {}
-
-    // Image beacon (tracking pixel)
-    try {
-      var _origImage = window.Image;
-      window.Image = function(w, h) {
-        var img = new _origImage(w, h);
-        var _origSrc = _realGetDesc.call(Object, HTMLImageElement.prototype, 'src');
-        if (_origSrc) {
-          _realDefProp.call(Object, img, 'src', {
-            set: function(val) {
-              if (val && /collect|track|pixel|beacon|analytics|log|stat/i.test(val)) {
-                log('exfiltration', 'Image.src', { url: String(val).slice(0, 200) }, 'high', {
-                  why: 'Image beacon — tracking pixel exfiltration'
-                });
-              }
-              _origSrc.set.call(this, val);
-            },
-            get: _origSrc.get ? function() { return _origSrc.get.call(this); } : undefined,
-            configurable: true
-          });
-        }
-        return img;
-      };
-      window.Image.prototype = _origImage.prototype;
-      try { window.Image.toString = function() { return 'function Image() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
-
-    // ═══ 17. WEBRTC ═══
-    try {
-      if (typeof RTCPeerConnection !== 'undefined') {
-        var _OrigRTC = RTCPeerConnection;
-        window.RTCPeerConnection = function(config) {
-          log('webrtc', 'RTCPeerConnection', { iceServers: config ? config.iceServers : null }, 'critical', {
-            why: 'WebRTC — local IP address leak / STUN fingerprint'
-          });
-          var pc = new _OrigRTC(config);
-          // Hook createDataChannel
-          var origDC = pc.createDataChannel;
-          if (origDC) {
-            pc.createDataChannel = function(label) {
-              log('webrtc', 'createDataChannel', { label: label }, 'high', { why: 'WebRTC data channel — P2P data transfer' });
-              return origDC.apply(this, arguments);
-            };
+        pc.addEventListener('icecandidate', function(e) {
+          if (e && e.candidate) {
+            log('webrtc', 'onicecandidate', 'ICE candidate: ' + safeStr(e.candidate.candidate), { risk: 'critical', dir: 'response' });
           }
-          return pc;
+        });
+        return pc;
+      };
+      window.RTCPeerConnection.prototype = origRTC.prototype;
+    } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 18: MATH FINGERPRINTING (#18 math-fingerprint) — MEDIUM
+    // ════════════════════════════════════════════════════
+    var mathFns = ['acos','acosh','asin','asinh','atan','atanh','atan2','cos','cosh','exp','expm1','log','log1p','log2','log10','sin','sinh','sqrt','tan','tanh','cbrt'];
+    for (var mi = 0; mi < mathFns.length; mi++) {
+      (function(fnName) {
+        var orig = Math[fnName];
+        if (typeof orig !== 'function') return;
+        Math[fnName] = function() {
+          var result = orig.apply(Math, arguments);
+          log('math-fingerprint', 'Math.' + fnName, 'Math.' + fnName + '(' + safeStr(arguments[0]) + ') → ' + result, { risk: 'medium', val: result, dir: 'response' });
+          return result;
         };
-        window.RTCPeerConnection.prototype = _OrigRTC.prototype;
-        try { window.RTCPeerConnection.toString = function() { return 'function RTCPeerConnection() { [native code] }'; }; } catch(e) {}
+      })(mathFns[mi]);
+    }
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 19: PERMISSIONS (#19 permissions) — HIGH
+    //  Hook in interceptor ONLY (NOT stealth!) — v4.6.2 lesson
+    // ════════════════════════════════════════════════════
+    try {
+      if (navigator.permissions && navigator.permissions.query) {
+        hookFn(navigator.permissions, 'query', 'permissions', 'high', { why: 'Permission state probe' });
       }
     } catch(e) {}
 
-    // ═══ 18. MATH FINGERPRINTING ═══
-    try {
-      ['acos', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'atan2', 'cbrt', 'cos', 'cosh',
-       'exp', 'expm1', 'log', 'log1p', 'log2', 'log10', 'sin', 'sinh', 'sqrt', 'tan', 'tanh'
-      ].forEach(function(fn) {
-        if (Math[fn]) {
-          hookFn(Math, fn, 'math-fingerprint', 'medium', {
-            detailFn: function(a) { return { input: a[0] }; },
-            captureReturn: true,
-            why: 'Math.' + fn + ' — floating-point inconsistency fingerprint'
-          });
-        }
-      });
-    } catch(e) {}
 
-    // ═══ 19. TIMEZONE ═══
-    try {
-      hookFn(Date.prototype, 'getTimezoneOffset', 'fingerprint', 'medium', {
-        captureReturn: true,
-        why: 'Timezone offset — geolocation fingerprint'
-      });
-    } catch(e) {}
-
-    // ═══ 20. INTL FINGERPRINTING ═══
-    try {
-      if (window.Intl) {
-        if (Intl.DateTimeFormat) {
-          hookFn(Intl.DateTimeFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', {
-            captureReturn: true,
-            why: 'Intl.DateTimeFormat — locale/timezone fingerprint'
-          });
-        }
-        if (Intl.NumberFormat) {
-          hookFn(Intl.NumberFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', {
-            captureReturn: true,
-            why: 'Intl.NumberFormat — locale-specific number formatting'
-          });
-        }
-        if (Intl.RelativeTimeFormat) {
-          hookFn(Intl.RelativeTimeFormat.prototype, 'resolvedOptions', 'intl-fingerprint', 'low', {
-            why: 'Intl.RelativeTimeFormat — locale detection'
-          });
-        }
-      }
-    } catch(e) {}
-
-    // ═══ 21. SPEECH SYNTHESIS ═══
+    // ════════════════════════════════════════════════════
+    //  SECTION 20: SPEECH (#20 speech) — HIGH
+    // ════════════════════════════════════════════════════
     try {
       if (window.speechSynthesis) {
-        hookFn(window.speechSynthesis, 'getVoices', 'speech', 'high', {
-          captureReturn: true,
-          valueFn: function(r) { return r ? { count: r.length } : null; },
-          why: 'Speech voices — installed voice fingerprint'
-        });
+        hookFn(window.speechSynthesis, 'getVoices', 'speech', 'high', { why: 'Voice enumeration fingerprint' });
       }
     } catch(e) {}
 
-    // ═══ 22. CLIENT HINTS ═══
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 21: CLIENT HINTS (#21 client-hints) — CRITICAL
+    // ════════════════════════════════════════════════════
     try {
       if (navigator.userAgentData) {
-        hookFn(navigator.userAgentData, 'getHighEntropyValues', 'client-hints', 'critical', {
-          detailFn: function(a) { return { hints: a[0] }; },
-          captureReturn: true,
-          why: 'User-Agent Client Hints — high-entropy browser data'
-        });
+        hookFn(navigator.userAgentData, 'getHighEntropyValues', 'client-hints', 'critical', { why: 'High-entropy client hints' });
+        hookGetter(navigator.userAgentData, 'brands', 'client-hints', 'high', { why: 'UA brands read' });
+        hookGetter(navigator.userAgentData, 'platform', 'client-hints', 'high', { why: 'UA platform read' });
+        hookGetter(navigator.userAgentData, 'mobile', 'client-hints', 'medium', { why: 'UA mobile check' });
       }
     } catch(e) {}
 
-    // ═══ 23. CREDENTIAL API ═══
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 22: INTL FINGERPRINTING (#22 intl-fingerprint) — MEDIUM
+    // ════════════════════════════════════════════════════
+    var intlTypes = ['DateTimeFormat','NumberFormat','Collator','ListFormat','RelativeTimeFormat','PluralRules'];
+    for (var ii = 0; ii < intlTypes.length; ii++) {
+      (function(typeName) {
+        try {
+          if (Intl[typeName] && Intl[typeName].prototype.resolvedOptions) {
+            hookFn(Intl[typeName].prototype, 'resolvedOptions', 'intl-fingerprint', 'medium', { why: 'Intl.' + typeName + '.resolvedOptions' });
+          }
+        } catch(e) {}
+      })(intlTypes[ii]);
+    }
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 23: CSS FINGERPRINTING (#23 css-fingerprint) — MEDIUM
+    //  [C-INT-08] matchMedia hook with value capture
+    // ════════════════════════════════════════════════════
     try {
-      if (navigator.credentials) {
-        if (navigator.credentials.get) {
-          hookFn(navigator.credentials, 'get', 'credential', 'critical', { why: 'Credential API get — authentication probe' });
-        }
-        if (navigator.credentials.create) {
-          hookFn(navigator.credentials, 'create', 'credential', 'critical', { why: 'Credential API create — WebAuthn fingerprint' });
-        }
+      if (CSS && CSS.supports) {
+        hookFn(CSS, 'supports', 'css-fingerprint', 'medium', { why: 'CSS.supports feature detection' });
       }
     } catch(e) {}
-
-    // ═══ 24. PROPERTY ENUMERATION — filtered to navigator/screen (v4.1 approach) ═══
     try {
-      var origObjKeys = Object.keys;
-      Object.keys = function(obj) {
-        var result = origObjKeys.call(Object, obj);
-        if (obj === navigator || obj === screen || obj === Navigator.prototype || obj === Screen.prototype) {
-          log('property-enum', 'Object.keys', { target: obj === navigator || obj === Navigator.prototype ? 'navigator' : 'screen' }, 'high', {
-            returnValue: { count: result.length },
-            why: 'Property enumeration — CreepJS-style lie detection'
-          });
-        }
+      var origMatchMedia = window.matchMedia;
+      window.matchMedia = function(query) {
+        log('css-fingerprint', 'matchMedia', 'Media query: ' + safeStr(query), { risk: 'medium', dir: 'call' });
+        var result = origMatchMedia.call(window, query);
+        log('css-fingerprint', 'matchMedia', 'matchMedia(' + safeStr(query) + ') → matches:' + result.matches, { risk: 'medium', val: result.matches, dir: 'response' });
         return result;
       };
-      try { Object.keys.toString = function() { return 'function keys() { [native code] }'; }; } catch(e) {}
     } catch(e) {}
 
-    try {
-      var origObjGetOPN = Object.getOwnPropertyNames;
-      Object.getOwnPropertyNames = function(obj) {
-        var result = origObjGetOPN.call(Object, obj);
-        if (obj === navigator || obj === screen || obj === Navigator.prototype || obj === Screen.prototype) {
-          log('property-enum', 'Object.getOwnPropertyNames', { target: 'navigator/screen' }, 'high', {
-            returnValue: { count: result.length },
-            why: 'Property name enumeration — prototype lie detection'
-          });
-        }
-        return result;
-      };
-      try { Object.getOwnPropertyNames.toString = function() { return 'function getOwnPropertyNames() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
 
-    // ═══ 25. OFFSCREEN CANVAS ═══
+    // ════════════════════════════════════════════════════
+    //  SECTION 24: PROPERTY ENUMERATION (#24 property-enum) — HIGH
+    //  [C-INT-03] Filtered: ONLY navigator/screen/prototype
+    // ════════════════════════════════════════════════════
+    Object.keys = function(obj) {
+      var result = origObjKeys.call(Object, obj);
+      if (obj === navigator || obj === screen || obj === Navigator.prototype || obj === Screen.prototype || obj === window) {
+        log('property-enum', 'Object.keys', 'Object.keys on ' + (obj === navigator ? 'navigator' : obj === screen ? 'screen' : obj === window ? 'window' : 'prototype'), { risk: 'high', val: result.length + ' keys', dir: 'response' });
+      }
+      return result;
+    };
+    Object.getOwnPropertyNames = function(obj) {
+      var result = origObjGetOwnPropNames.call(Object, obj);
+      if (obj === navigator || obj === screen || obj === Navigator.prototype || obj === Screen.prototype || obj === window) {
+        log('property-enum', 'Object.getOwnPropertyNames', 'getOwnPropertyNames on ' + (obj === navigator ? 'navigator' : obj === screen ? 'screen' : obj === window ? 'window' : 'prototype'), { risk: 'high', val: result.length + ' props', dir: 'response' });
+      }
+      return result;
+    };
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 25: OFFSCREEN CANVAS (#25 offscreen-canvas) — HIGH
+    // ════════════════════════════════════════════════════
     try {
       if (typeof OffscreenCanvas !== 'undefined') {
-        var OrigOffscreen = OffscreenCanvas;
-        window.OffscreenCanvas = function(w, h) {
-          log('offscreen-canvas', 'new OffscreenCanvas', { width: w, height: h }, 'high', {
-            why: 'OffscreenCanvas — worker-based canvas fingerprinting'
-          });
-          return new OrigOffscreen(w, h);
-        };
-        window.OffscreenCanvas.prototype = OrigOffscreen.prototype;
-        try { window.OffscreenCanvas.toString = function() { return 'function OffscreenCanvas() { [native code] }'; }; } catch(e) {}
+        hookFn(OffscreenCanvas.prototype, 'getContext', 'offscreen-canvas', 'high', { why: 'OffscreenCanvas context' });
+        hookFn(OffscreenCanvas.prototype, 'transferToImageBitmap', 'offscreen-canvas', 'high', { why: 'OffscreenCanvas bitmap transfer' });
+        hookFn(OffscreenCanvas.prototype, 'convertToBlob', 'offscreen-canvas', 'high', { why: 'OffscreenCanvas blob export' });
       }
     } catch(e) {}
 
-    // ═══ 26. HONEYPOT — trap for suspicious property access ═══
-    try {
-      var honeypotProps = ['__selenium_evaluate', '__driver_evaluate', '__webdriver_evaluate', 'callPhantom',
-                          'domAutomation', '__nightmare', '_Recaptcha'];
-      honeypotProps.forEach(function(prop) {
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 26: HONEYPOT (#26 honeypot) — CRITICAL
+    // ════════════════════════════════════════════════════
+    var traps = [
+      { name: '__fpjs_d_m', desc: 'FingerprintJS trap' },
+      { name: '_Selenium_IDE_Recorder', desc: 'Selenium trap' },
+      { name: '__selenium_evaluate', desc: 'Selenium evaluate trap' },
+      { name: 'callPhantom', desc: 'PhantomJS trap' },
+      { name: '_phantom', desc: 'Phantom trap' },
+      { name: '__nightmare', desc: 'Nightmare trap' }
+    ];
+    for (var ti = 0; ti < traps.length; ti++) {
+      (function(trap) {
         try {
-          _realDefProp.call(Object, window, prop, {
+          realDefProp(window, trap.name, {
             get: function() {
-              log('honeypot', prop, { trap: prop }, 'critical', { why: 'Honeypot triggered — automation detection attempt' });
+              log('honeypot', trap.name, trap.desc + ' accessed', { risk: 'critical', dir: 'call' });
               return undefined;
             },
             set: function() {},
-            configurable: true
+            enumerable: false, configurable: true
           });
         } catch(e) {}
-      });
+      })(traps[ti]);
+    }
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 27: CREDENTIALS (#27 credential) — CRITICAL
+    // ════════════════════════════════════════════════════
+    try {
+      if (navigator.credentials) {
+        hookFn(navigator.credentials, 'get', 'credential', 'critical', { why: 'Credential access' });
+        hookFn(navigator.credentials, 'create', 'credential', 'critical', { why: 'Credential creation' });
+      }
     } catch(e) {}
 
-    // ═══ 27. EVENT LISTENERS (suspicious patterns — v4.6.3 RESTORED + EXPANDED) ═══
-    // v4.6.3: Restored from v4.4.1 + expanded. Section 38 only handled message+sensor,
-    // but missed focus/blur/visibilitychange/resize which are used for behavioral fingerprinting
-    // NOTE: This is now merged INTO section 38 below (EventTarget.prototype.addEventListener)
 
-    // ═══ 28. INTERSECTION/MUTATION OBSERVERS ═══
+    // ════════════════════════════════════════════════════
+    //  SECTION 28: SYSTEM / BOOT (#28 system) — INFO
+    //  [C-INT-09] BOOT_OK mandatory
+    // ════════════════════════════════════════════════════
+    log('system', 'BOOT_OK', 'Sentinel v5.0.0 interceptor active — ' + categoriesMonitored + ' categories', { risk: 'info', dir: 'call' });
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 29: ENCODING (#29 encoding) — LOW
+    // ════════════════════════════════════════════════════
+    try { hookFn(TextEncoder.prototype, 'encode', 'encoding', 'low', { why: 'TextEncoder probe' }); } catch(e) {}
+    try { hookFn(TextDecoder.prototype, 'decode', 'encoding', 'low', { why: 'TextDecoder probe' }); } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 30: WORKER (#30 worker) — HIGH
+    // ════════════════════════════════════════════════════
+    var origWorker = window.Worker;
     try {
-      if (typeof IntersectionObserver !== 'undefined') {
-        var OrigIO = IntersectionObserver;
-        window.IntersectionObserver = function(callback, options) {
-          log('dom-probe', 'IntersectionObserver', { rootMargin: options ? options.rootMargin : null }, 'medium', {
-            why: 'IntersectionObserver — viewport/visibility detection'
-          });
-          return new OrigIO(callback, options);
+      window.Worker = function(url, opts) {
+        log('worker', 'Worker', 'New Worker: ' + safeStr(url), { risk: 'high', dir: 'call' });
+        return new origWorker(url, opts);
+      };
+      window.Worker.prototype = origWorker.prototype;
+    } catch(e) {}
+    var origSharedWorker = window.SharedWorker;
+    try {
+      if (origSharedWorker) {
+        window.SharedWorker = function(url, opts) {
+          log('worker', 'SharedWorker', 'New SharedWorker: ' + safeStr(url), { risk: 'high', dir: 'call' });
+          return new origSharedWorker(url, opts);
         };
-        window.IntersectionObserver.prototype = OrigIO.prototype;
-        try { window.IntersectionObserver.toString = function() { return 'function IntersectionObserver() { [native code] }'; }; } catch(e) {}
+        window.SharedWorker.prototype = origSharedWorker.prototype;
       }
     } catch(e) {}
 
-    try {
-      if (typeof MutationObserver !== 'undefined') {
-        var OrigMO = MutationObserver;
-        window.MutationObserver = function(callback) {
-          log('dom-probe', 'MutationObserver', {}, 'low', { why: 'MutationObserver — DOM change monitoring' });
-          return new OrigMO(callback);
-        };
-        window.MutationObserver.prototype = OrigMO.prototype;
-        try { window.MutationObserver.toString = function() { return 'function MutationObserver() { [native code] }'; }; } catch(e) {}
-      }
-    } catch(e) {}
 
-    // ═══ 29. ENCODING (TextEncoder/TextDecoder) ═══
-    try {
-      if (typeof TextEncoder !== 'undefined') {
-        hookFn(TextEncoder.prototype, 'encode', 'encoding', 'low', { why: 'TextEncoder — data encoding' });
-      }
-    } catch(e) {}
-
-    // ═══ 30. WEBASSEMBLY ═══
+    // ════════════════════════════════════════════════════
+    //  SECTION 31: WEBASSEMBLY (#31 webassembly) — CRITICAL
+    // ════════════════════════════════════════════════════
     try {
       if (typeof WebAssembly !== 'undefined') {
-        if (WebAssembly.instantiate) {
-          hookFn(WebAssembly, 'instantiate', 'webassembly', 'high', { why: 'WebAssembly.instantiate — binary code execution' });
-        }
-        if (WebAssembly.compile) {
-          hookFn(WebAssembly, 'compile', 'webassembly', 'high', { why: 'WebAssembly.compile — binary code compilation' });
-        }
+        hookFn(WebAssembly, 'instantiate', 'webassembly', 'critical', { why: 'WASM instantiation' });
+        hookFn(WebAssembly, 'compile', 'webassembly', 'critical', { why: 'WASM compilation' });
+        hookFn(WebAssembly, 'instantiateStreaming', 'webassembly', 'critical', { why: 'WASM streaming instantiation' });
+        hookFn(WebAssembly, 'validate', 'webassembly', 'high', { why: 'WASM validation' });
       }
     } catch(e) {}
 
-    // ═══ 31. KEYBOARD LAYOUT ═══
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 32: KEYBOARD LAYOUT (#32 keyboard-layout) — HIGH
+    // ════════════════════════════════════════════════════
     try {
       if (navigator.keyboard && navigator.keyboard.getLayoutMap) {
-        hookFn(navigator.keyboard, 'getLayoutMap', 'keyboard-layout', 'high', {
-          why: 'Keyboard layout map — locale/hardware fingerprint'
-        });
+        hookFn(navigator.keyboard, 'getLayoutMap', 'keyboard-layout', 'high', { why: 'Keyboard layout fingerprint' });
       }
     } catch(e) {}
 
-    // ═══ 32. SENSOR APIS ═══
-    try {
-      ['Accelerometer', 'Gyroscope', 'Magnetometer', 'AbsoluteOrientationSensor', 'RelativeOrientationSensor',
-       'LinearAccelerationSensor', 'GravitySensor', 'AmbientLightSensor'].forEach(function(sensor) {
-        if (typeof window[sensor] !== 'undefined') {
-          var OrigSensor = window[sensor];
-          window[sensor] = function(opts) {
-            log('sensor-apis', 'new ' + sensor, opts || {}, 'high', { why: sensor + ' — device sensor fingerprint' });
-            return new OrigSensor(opts);
-          };
-          window[sensor].prototype = OrigSensor.prototype;
-        }
-      });
-    } catch(e) {}
 
-    // ═══ 33. VISUALIZATION (requestAnimationFrame timing) ═══
-    try {
-      var _origRAF = window.requestAnimationFrame;
-      var _rafCount = 0;
-      window.requestAnimationFrame = function(cb) {
-        _rafCount++;
-        if (_rafCount <= 3 || _rafCount % 100 === 0) {
-          log('visualization', 'requestAnimationFrame', { callCount: _rafCount }, 'low', {
-            why: 'rAF — rendering pipeline timing (FP when measured precisely)'
-          });
-        }
-        return _origRAF.call(window, cb);
-      };
-      try { window.requestAnimationFrame.toString = function() { return 'function requestAnimationFrame() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
-
-    // ═══ v4.6 QUIET MODE EXPORT ═══
-    // Non-enumerable: Object.keys(window) won't reveal sentinel
-    try {
-      Object.defineProperty(window, '__SENTINEL_DATA__', {
-        get: function() { return _sentinel; },
-        configurable: true,
-        enumerable: false
-      });
-      Object.defineProperty(window, '__SENTINEL_ACTIVE__', {
-        get: function() { return true; },
-        configurable: true,
-        enumerable: false
-      });
-    } catch(e) {
-      // Fallback for restricted contexts
-      window.__SENTINEL_DATA__ = _sentinel;
+    // ════════════════════════════════════════════════════
+    //  SECTION 33: SENSOR APIS (#33 sensor-apis) — HIGH
+    // ════════════════════════════════════════════════════
+    var sensorClasses = ['Accelerometer','Gyroscope','LinearAccelerationSensor','AbsoluteOrientationSensor','RelativeOrientationSensor','AmbientLightSensor','Magnetometer','GravitySensor'];
+    for (var sci = 0; sci < sensorClasses.length; sci++) {
+      (function(cls) {
+        try {
+          if (window[cls]) {
+            var origCls = window[cls];
+            window[cls] = function(opts) {
+              log('sensor-apis', cls, cls + ' instantiated', { risk: 'high', dir: 'call' });
+              return new origCls(opts);
+            };
+            window[cls].prototype = origCls.prototype;
+          }
+        } catch(e) {}
+      })(sensorClasses[sci]);
     }
 
-    window.__SENTINEL_FLUSH__ = function() {
-      return JSON.stringify({
-        events: _sentinel.events.slice(0),
-        dedupStats: {
-          totalReceived: _sentinel.events.length + _sentinel.dedupCount,
-          deduplicated: _sentinel.dedupCount,
-          kept: _sentinel.events.length
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 34: VISUALIZATION (#34 visualization) — MEDIUM
+    // ════════════════════════════════════════════════════
+    var origRAF = window.requestAnimationFrame;
+    var rafCount = 0;
+    if (origRAF) {
+      window.requestAnimationFrame = function(cb) {
+        rafCount++;
+        if (rafCount <= 5 || rafCount % 50 === 0) {
+          log('visualization', 'requestAnimationFrame', 'rAF call #' + rafCount, { risk: 'medium', dir: 'call' });
         }
-      });
+        return origRAF.call(window, cb);
+      };
+    }
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 35: BATTERY (#35 battery) — HIGH
+    //  [C-INT-07] navigator.getBattery() — restored from v3
+    // ════════════════════════════════════════════════════
+    try {
+      if (navigator.getBattery) {
+        var origGetBattery = navigator.getBattery;
+        navigator.getBattery = function() {
+          log('battery', 'getBattery', 'Battery API access', { risk: 'high', dir: 'call' });
+          return origGetBattery.call(navigator).then(function(battery) {
+            log('battery', 'getBattery', 'Battery: charging=' + battery.charging + ', level=' + battery.level, { risk: 'high', val: battery.level, dir: 'response' });
+            return battery;
+          });
+        };
+      }
+    } catch(e) {}
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 36: EVENT MONITORING (#36 event-monitoring) — MEDIUM
+    //  [C-INT-05] focus, blur, visibility, resize, sensors
+    //  Restored from v4.6.3 — was deleted in v4.6.2!
+    // ════════════════════════════════════════════════════
+    var monitoredEvents = ['focus','blur','visibilitychange','resize','devicemotion','deviceorientation'];
+    var origAddEventListener = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function(type, listener, opts) {
+      if (monitoredEvents.indexOf(type) >= 0) {
+        log('event-monitoring', 'addEventListener', 'Listener added: ' + type, { risk: 'medium', dir: 'call' });
+      }
+      return origAddEventListener.call(this, type, listener, opts);
     };
 
-    window.__SENTINEL_CONTEXT_MAP__ = [{
-      type: 'page',
-      url: (function() { try { return location.href; } catch(e) { return 'unknown'; } })(),
-      origin: (function() { try { return location.origin; } catch(e) { return 'unknown'; } })(),
-      frameId: _sentinel.frameId,
-      bootOk: true,
-      timestamp: Date.now()
-    }];
 
-
-    // ═══ 34. BLOB/DATA URL MONITORING (v4.6 NEW) ═══
+    // ════════════════════════════════════════════════════
+    //  SECTION 37: BLOB URL (#37 blob-url) — HIGH
+    // ════════════════════════════════════════════════════
     try {
-      var _origCreateObjectURL = URL.createObjectURL;
-      if (_origCreateObjectURL) {
-        URL.createObjectURL = function(obj) {
-          var result = _origCreateObjectURL.apply(URL, arguments);
-          var detail = { type: 'unknown', size: 0 };
-          try {
-            if (obj instanceof Blob) {
-              detail.type = obj.type || 'unknown';
-              detail.size = obj.size || 0;
-              // Flag suspicious: JS/HTML blobs could be script injection
-              if (obj.type && obj.type.match(/javascript|html|text.plain/i)) {
-                detail.suspicious = true;
-              }
-            }
-          } catch(e) {}
-          log('dom-probe', 'URL.createObjectURL', detail,
-            detail.suspicious ? 'high' : 'medium',
-            { returnValue: result ? result.slice(0, 100) : null, why: 'Blob URL creation — potential script isolation for fingerprinting bypass' });
-          return result;
-        };
-        try { URL.createObjectURL.toString = function() { return 'function createObjectURL() { [native code] }'; }; } catch(e) {}
-      }
+      var origCreateObjectURL = URL.createObjectURL;
+      URL.createObjectURL = function(blob) {
+        log('blob-url', 'URL.createObjectURL', 'Blob URL created, type: ' + (blob && blob.type || 'unknown'), { risk: 'high', dir: 'call' });
+        return origCreateObjectURL.call(URL, blob);
+      };
+    } catch(e) {}
+    try {
+      var origBlob = window.Blob;
+      window.Blob = function(parts, opts) {
+        var type = (opts && opts.type) || 'unknown';
+        if (type.indexOf('javascript') >= 0 || type.indexOf('wasm') >= 0) {
+          log('blob-url', 'Blob', 'Dynamic code blob: type=' + type, { risk: 'high', dir: 'call' });
+        }
+        return new origBlob(parts, opts);
+      };
+      window.Blob.prototype = origBlob.prototype;
     } catch(e) {}
 
-    // ═══ 35. SHAREDARRAYBUFFER MONITORING (v4.6 NEW) ═══
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 38: SHARED ARRAY BUFFER (#38 shared-array-buffer) — HIGH
+    // ════════════════════════════════════════════════════
     try {
       if (typeof SharedArrayBuffer !== 'undefined') {
-        var _OrigSAB = SharedArrayBuffer;
-        window.SharedArrayBuffer = function(length) {
-          log('hardware', 'new SharedArrayBuffer', { byteLength: length }, 'critical', {
-            why: 'SharedArrayBuffer — enables sub-microsecond timing attacks for hardware fingerprinting'
-          });
-          return new _OrigSAB(length);
+        var origSAB = SharedArrayBuffer;
+        window.SharedArrayBuffer = function(len) {
+          log('shared-array-buffer', 'SharedArrayBuffer', 'SAB created: ' + len + ' bytes (timing attack vector)', { risk: 'high', dir: 'call' });
+          return new origSAB(len);
         };
-        window.SharedArrayBuffer.prototype = _OrigSAB.prototype;
-        try { window.SharedArrayBuffer.toString = function() { return 'function SharedArrayBuffer() { [native code] }'; }; } catch(e) {}
+        window.SharedArrayBuffer.prototype = origSAB.prototype;
       }
     } catch(e) {}
 
-    // ═══ 36. PERFORMANCE.NOW PRECISION LOGGING (v4.6 NEW) ═══
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 39: POSTMESSAGE EXFIL (#39 postmessage-exfil) — MEDIUM
+    // ════════════════════════════════════════════════════
+    var origPostMessage = window.postMessage;
+    window.postMessage = function(data, origin) {
+      log('postmessage-exfil', 'postMessage', 'Cross-frame message → ' + safeStr(origin), { risk: 'medium', val: safeStr(data), dir: 'call' });
+      return origPostMessage.apply(window, arguments);
+    };
+    origAddEventListener.call(window, 'message', function(e) {
+      log('postmessage-exfil', 'onmessage', 'Message received from: ' + (e.origin || 'unknown'), { risk: 'medium', val: safeStr(e.data), dir: 'response' });
+    });
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 40: PERFORMANCE NOW (granular) (#40 performance-now) — MEDIUM
+    //  Extended from perf-timing — tracks precision abuse
+    // ════════════════════════════════════════════════════
+    // Already hooked in section 9; this section adds cross-reference for timing attacks
+    // High-frequency performance.now calls are flagged by correlation engine
+
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 41: DEVICE INFO (#41 device-info) — MEDIUM
+    // ════════════════════════════════════════════════════
     try {
-      var _origPerfNow = Performance.prototype.now;
-      var _perfNowCount = 0;
-      if (_shield) {
-        _shield.hookFunction(Performance.prototype, 'now', function(original) {
-          var result = original.call(this);
-          _perfNowCount++;
-          // Only log periodically to avoid noise (timing APIs called thousands of times)
-          if (_perfNowCount <= 5 || _perfNowCount % 200 === 0) {
-            log('perf-timing', 'performance.now', { callCount: _perfNowCount }, 'medium', {
-              returnValue: result,
-              why: 'performance.now — high-res timer used for timing attacks'
-            });
-          }
-          return result;
-        });
+      if (navigator.connection) {
+        hookGetter(navigator.connection, 'effectiveType', 'device-info', 'medium', { why: 'Network connection type' });
+        hookGetter(navigator.connection, 'downlink', 'device-info', 'medium', { why: 'Network downlink speed' });
+        hookGetter(navigator.connection, 'rtt', 'device-info', 'medium', { why: 'Network RTT' });
+        hookGetter(navigator.connection, 'saveData', 'device-info', 'medium', { why: 'Data saver mode' });
       }
     } catch(e) {}
 
-    // ═══ 37. POSTMESSAGE MONITORING (v4.6 NEW — cross-frame communication) ═══
-    try {
-      var _origPostMessage = window.postMessage;
-      window.postMessage = function(message, targetOrigin) {
-        var detail = { targetOrigin: targetOrigin || '*' };
+
+    // ════════════════════════════════════════════════════
+    //  SECTION 42: CROSS-FRAME COMM (#42 cross-frame-comm) — MEDIUM
+    // ════════════════════════════════════════════════════
+    // Cross-frame communication is captured via postMessage hooks in section 39
+    // and iframe monitoring via frameattached/framenavigated in index.js
+
+
+    // ════════════════════════════════════════════════════
+    //  PUSH TELEMETRY SETUP
+    //  [C-INT-10] Push every 500ms + immediate boot push
+    // ════════════════════════════════════════════════════
+    setInterval(function() {
+      if (events.length > 0 && typeof window.SENTINEL_PUSH === 'function') {
         try {
-          if (typeof message === 'string') detail.preview = message.slice(0, 200);
-          else if (typeof message === 'object') detail.preview = JSON.stringify(message).slice(0, 200);
-        } catch(e) { detail.preview = '[complex]'; }
-        log('exfiltration', 'postMessage', detail, 'high', {
-          why: 'Cross-frame postMessage — potential distributed fingerprinting coordination'
-        });
-        return _origPostMessage.apply(this, arguments);
-      };
-      try { window.postMessage.toString = function() { return 'function postMessage() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
-
-    // ═══ 38. EVENT LISTENER MONITOR (v4.6.3: UNIFIED section 27+38 — ALL suspicious events) ═══
-    try {
-      var _origAddEventListener = EventTarget.prototype.addEventListener;
-      var _msgListenerCount = 0;
-      var _suspiciousEvents = {
-        'focus': { cat: 'system', risk: 'medium', why: 'Focus event — tab visibility fingerprinting' },
-        'blur': { cat: 'system', risk: 'medium', why: 'Blur event — tab visibility fingerprinting' },
-        'visibilitychange': { cat: 'system', risk: 'high', why: 'Visibility change — anti-analysis detection' },
-        'resize': { cat: 'screen', risk: 'low', why: 'Resize event — viewport monitoring' },
-        'pagehide': { cat: 'system', risk: 'medium', why: 'Page hide — navigation fingerprinting' },
-        'pageshow': { cat: 'system', risk: 'medium', why: 'Page show — cache/navigation fingerprinting' },
-        'beforeunload': { cat: 'system', risk: 'medium', why: 'Before unload — exit monitoring' }
-      };
-      var _sensorEvents = {
-        'devicemotion': 'high', 'deviceorientation': 'high', 'deviceorientationabsolute': 'high',
-        'touchstart': 'medium', 'touchmove': 'low', 'touchend': 'low',
-        'pointerdown': 'medium', 'pointermove': 'low', 'pointerup': 'low'
-      };
-      EventTarget.prototype.addEventListener = function(type, listener, options) {
-        // Cross-frame message monitoring
-        if (type === 'message' && this === window) {
-          _msgListenerCount++;
-          log('exfiltration', 'addEventListener:message', { listenerCount: _msgListenerCount }, 'medium', {
-            why: 'Window message listener — receiving cross-frame fingerprint data'
-          });
-        }
-        // Sensor event detection (unified from v4.4.1 section 27)
-        if (_sensorEvents[type]) {
-          log('sensor-apis', 'addEventListener', { event: type }, _sensorEvents[type], {
-            why: 'Sensor event listener — device motion/orientation fingerprint'
-          });
-        }
-        // v4.6.3 NEW: Suspicious behavioral events (was in v3, lost in v4.6)
-        if (_suspiciousEvents[type]) {
-          var info = _suspiciousEvents[type];
-          log(info.cat, 'addEventListener:' + type, { event: type }, info.risk, {
-            why: info.why
-          });
-        }
-        return _origAddEventListener.call(this, type, listener, options);
-      };
-      try { EventTarget.prototype.addEventListener.toString = function() { return 'function addEventListener() { [native code] }'; }; } catch(e) {}
-    } catch(e) {}
-
-
-    // ═══ 39. DUAL NETWORK CATEGORY LOGGING (v4.6.3 NEW — fix network:0 bug) ═══
-    // v4.6.3: In v4.6.2, fetch/XHR/sendBeacon only logged to 'exfiltration' category.
-    // The 'network' category in coverageMatrix was ALWAYS SILENT (0 events).
-    // Fix: Add secondary logging to 'network' for all outbound requests.
-    try {
-      // Wrap the already-hooked fetch to also log to 'network'
-      var _sentinelFetch = window.fetch;
-      window.fetch = function() {
-        var url = arguments[0];
-        if (typeof url === 'object' && url.url) url = url.url;
-        log('network', 'fetch', { url: String(url || '').slice(0, 300), method: (arguments[1] && arguments[1].method) || 'GET' }, 'medium', {
-          why: 'Outbound fetch request — network monitoring'
-        });
-        return _sentinelFetch.apply(this, arguments);
-      };
-      try { window.fetch.toString = function() { return _realToString.call(_sentinelFetch); }; } catch(e) {}
-    } catch(e) {}
-
-    // Wrap XHR.send for dual network logging
-    try {
-      var _sentinelXHRSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.send = function() {
-        log('network', 'xhr.send', { url: this.__sentinel_url || 'unknown', method: this.__sentinel_method || 'GET' }, 'medium', {
-          why: 'XHR send — network monitoring'
-        });
-        return _sentinelXHRSend.apply(this, arguments);
-      };
-      try { XMLHttpRequest.prototype.send.toString = function() { return _realToString.call(_sentinelXHRSend); }; } catch(e) {}
-    } catch(e) {}
-
-    // Wrap sendBeacon for dual network logging
-    try {
-      if (navigator.sendBeacon) {
-        var _sentinelBeacon = navigator.sendBeacon;
-        navigator.sendBeacon = function(url, data) {
-          log('network', 'sendBeacon', { url: String(url).slice(0, 300), size: data ? String(data).length : 0 }, 'medium', {
-            why: 'Beacon — network monitoring'
-          });
-          return _sentinelBeacon.apply(navigator, arguments);
-        };
-        try { navigator.sendBeacon.toString = function() { return _realToString.call(_sentinelBeacon); }; } catch(e) {}
+          window.SENTINEL_PUSH(JSON.stringify({ type: 'EVENTS', data: events.splice(0, events.length) }));
+        } catch(e) {}
       }
-    } catch(e) {}
+    }, 500);
 
-    // Image src tracking for network (1-pixel tracking beacons)
-    try {
-      var _origImageSrc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
-      if (_origImageSrc && _origImageSrc.set) {
-        var _origImgSrcSet = _origImageSrc.set;
-        Object.defineProperty(HTMLImageElement.prototype, 'src', {
-          get: _origImageSrc.get,
-          set: function(v) {
-            if (v && typeof v === 'string' && v.startsWith('http')) {
-              log('network', 'img.src', { url: String(v).slice(0, 300) }, 'low', {
-                why: 'Image load — potential tracking pixel'
-              });
-            }
-            return _origImgSrcSet.call(this, v);
-          },
-          enumerable: true,
-          configurable: true
-        });
+    // Immediate boot push after 50ms
+    setTimeout(function() {
+      if (events.length > 0 && typeof window.SENTINEL_PUSH === 'function') {
+        try {
+          window.SENTINEL_PUSH(JSON.stringify({ type: 'EVENTS', data: events.splice(0, events.length) }));
+        } catch(e) {}
       }
-    } catch(e) {}
+    }, 50);
 
-
-    // ═══ 40. PERMISSIONS API (v4.6.3 — moved from stealth-config to interceptor) ═══
-    // v4.6.3: In v4.6.2 this was in stealth-config.js which ran separately and
-    // REPLACED the interceptor's hook — causing 0 permissions events.
-    try {
-      if (navigator.permissions && navigator.permissions.query) {
-        var _origPermQuery = navigator.permissions.query.bind(navigator.permissions);
-        navigator.permissions.query = function(desc) {
-          var permName = desc ? (desc.name || 'unknown') : 'unknown';
-          log('permissions', 'permissions.query', { name: permName }, 'medium', {
-            why: 'Permissions API query — capability fingerprinting'
-          });
-          return _origPermQuery(desc).then(function(result) {
-            log('permissions', 'permissions.result', { name: permName, state: result.state }, 'medium', {
-              returnValue: result.state,
-              why: 'Permission state — ' + permName
-            });
-            return result;
-          });
-        };
-        try { navigator.permissions.query.toString = function() { return 'function query() { [native code] }'; }; } catch(e) {}
-      }
-    } catch(e) {}
-
-    // ═══ 41. GAMEPAD API (v4.6.3 NEW — was never hooked despite category existing) ═══
-    try {
-      if (navigator.getGamepads) {
-        hookFn(navigator, 'getGamepads', 'gamepad', 'medium', {
-          captureReturn: true,
-          valueFn: function(r) { return r ? { count: Array.from(r).filter(Boolean).length } : { count: 0 }; },
-          why: 'Gamepad API — hardware enumeration fingerprinting'
-        });
-      }
-    } catch(e) {}
-
-    // ═══ 42. CSS.supports (v4.6.3 NEW — for css-fingerprint category) ═══
-    try {
-      if (typeof CSS !== 'undefined' && CSS.supports) {
-        var _origCSSSupports = CSS.supports;
-        CSS.supports = function() {
-          var args = Array.prototype.slice.call(arguments);
-          var query = args.join(', ');
-          log('css-fingerprint', 'CSS.supports', { query: String(query).slice(0, 200) }, 'low', {
-            why: 'CSS feature detection — browser capability fingerprinting'
-          });
-          return _origCSSSupports.apply(CSS, arguments);
-        };
-        try { CSS.supports.toString = function() { return 'function supports() { [native code] }'; }; } catch(e) {}
-      }
-    } catch(e) {}
-
-    // ═══ PUSH TELEMETRY (v4.6.3: 500ms + immediate boot push) ═══
-    if (typeof window.__SENTINEL_PUSH__ === 'function' || typeof window.__s46push__ === 'function') {
-      var _pushFn = typeof window.__SENTINEL_PUSH__ === 'function' ? window.__SENTINEL_PUSH__ : window.__s46push__;
-      var _lastPushIndex = 0;
-
-      // v4.6.3: Immediate boot push — capture first-second burst events
-      try {
-        var _pushOrigin = (function() { try { return location.origin; } catch(e) { return 'unknown'; } })();
-        if (_sentinel.events.length > 0) {
-          var bootBatch = _sentinel.events.slice(0, 500);
-          _lastPushIndex = bootBatch.length;
-          _pushFn(JSON.stringify({
-            type: 'boot_batch',
-            frameId: _sentinel.frameId,
-            origin: _pushOrigin,
-            events: bootBatch
-          }));
-        }
-      } catch(e) {}
-
-      // v4.6.3: 500ms interval (was 2000ms — too slow for BrowserScan burst)
-      setInterval(function() {
-        if (_sentinel.events.length > _lastPushIndex) {
+    // SENTINEL_FLUSH handler for final collection
+    Object.defineProperty(window, '__SENTINEL_FLUSH__', {
+      value: function() {
+        if (events.length > 0 && typeof window.SENTINEL_PUSH === 'function') {
           try {
-            var newEvents = _sentinel.events.slice(_lastPushIndex, _lastPushIndex + 500);
-            _lastPushIndex += newEvents.length;
-            _pushFn(JSON.stringify({
-              type: 'event_batch',
-              frameId: _sentinel.frameId,
-              origin: (function() { try { return location.origin; } catch(e) { return 'unknown'; } })(),
-              events: newEvents
-            }));
+            window.SENTINEL_PUSH(JSON.stringify({ type: 'FINAL_FLUSH', data: events.splice(0, events.length) }));
           } catch(e) {}
         }
-      }, 500);
-    }
+        return window.__SENTINEL_DATA__;
+      },
+      writable: false, enumerable: false, configurable: false
+    });
 
-    // Ghost Protocol: zero console output
-  })();
-  `;
+  })();`;
 }
 
-module.exports = { getInterceptorScript };
+module.exports = { generateInterceptorScript };
