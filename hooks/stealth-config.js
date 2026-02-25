@@ -22,13 +22,6 @@ var StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
 function createStealthPlugin() {
   var stealth = StealthPlugin();
-  // All 17 default evasions enabled:
-  // chrome.app, chrome.csi, chrome.loadTimes, chrome.runtime,
-  // defaultArgs, iframe.contentWindow, media.codecs,
-  // navigator.hardwareConcurrency, navigator.languages,
-  // navigator.permissions, navigator.plugins, navigator.vendor,
-  // navigator.webdriver, sourceurl, user-agent-override,
-  // webgl.vendor, window.outerdimensions
   return stealth;
 }
 

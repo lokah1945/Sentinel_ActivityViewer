@@ -1,7 +1,18 @@
+#!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
 //  SENTINEL v7.0.0 — HYBRID DUAL-TELEMETRY FORENSIC ENGINE
 //  Main Orchestrator: 12-Layer Pipeline
 // ═══════════════════════════════════════════════════════════════
+// CHANGE LOG v7.0.0-fix1 (2026-02-26):
+//   - FIX: Added --dual-mode support (observe → stealth sequential)
+//   - FIX: Added --no-headless flag for visible browser
+//   - FIX: Added --timeout= and --wait= as separate CLI params
+//   - FIX: Added --persist= for user-specified profile directory
+//   - FIX: Added --no-stealth for comparison mode (observe only CDP)
+//   - FIX: SIGINT/SIGTERM graceful cleanup handlers
+//   - FIX: observe mode disables stealth plugin (pure CDP only)
+//   - FIX: Headless mode logic matches v6.4 behavior exactly
+//
 // CHANGE LOG v7.0.0 (2026-02-26):
 //   - PURE NEW CONCEPT: Hybrid engine combining:
 //     * v6.4 basis: persistentContext, rebrowser-patches, CDP observer,
@@ -21,23 +32,28 @@
 //   - L11: Parallel Collection + Dedup + Merge (REG-018)
 //   - L12: Unified Report Generation — JSON/HTML/CTX
 //   - REG-021: Final flush before browser close
-//   - REG-022: launchPersistentContext as default
-//   - REG-027: persistentContext auto-cleanup
+//   - REG-027: persistentContext auto-cleanup (CLEANUP_PROFILE)
 //   - NO BACKWARD COMPATIBILITY — pure v7.0.0 architecture
 //
 // LAST HISTORY LOG:
-//   v6.4.0: CDP-only observer, persistentContext, auto-cleanup
+//   v6.4.0: CDP-only observer, persistentContext, auto-cleanup, --dual-mode
 //   v6.1.0: Hook layer + CDP collectors, standard launch
 //   v5.0.0: Unified engine with 42 categories
 //   v7.0.0: Hybrid dual-telemetry (hook + CDP) with persistent context
+//   v7.0.0-fix1: Restored --dual-mode, --no-headless, full CLI from v6.4
 // ═══════════════════════════════════════════════════════════════
 
 'use strict';
 
+process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE = process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE || 'addBinding';
+process.env.REBROWSER_PATCHES_SOURCE_URL = process.env.REBROWSER_PATCHES_SOURCE_URL || 'analytics.js';
+
 var fs = require('fs');
 var path = require('path');
-var { chromium } = require('playwright-extra');
-var { createStealthPlugin } = require('./hooks/stealth-config');
+var os = require('os');
+var { addExtra } = require('playwright-extra');
+var playwrightCore = require('rebrowser-playwright');
+var StealthPlugin = require('puppeteer-extra-plugin-stealth');
 var { getShieldScript } = require('./hooks/anti-detection-shield');
 var { getInterceptorScript } = require('./hooks/api-interceptor');
 var { EventPipeline } = require('./lib/event-pipeline');
@@ -46,67 +62,155 @@ var { TargetGraph } = require('./lib/target-graph');
 var { CorrelationEngine } = require('./lib/correlation-engine');
 var { ReportGenerator } = require('./reporters/report-generator');
 
-// ═══════════════════════════════════════════
-//  CONFIGURATION
-// ═══════════════════════════════════════════
 var VERSION = 'sentinel-v7.0.0';
-var DEFAULT_TARGET = 'https://browserscan.net';
-var DEFAULT_TIMEOUT = 30000;
 var CLEANUP_PROFILE = true;
-var PROFILE_BASE = path.join(process.cwd(), '.sentinel-profiles');
 
-// Parse CLI arguments
+// ═══════════════════════════════════════════
+//  TEMP PROFILE CLEANUP REGISTRY
+// ═══════════════════════════════════════════
+var tempDirsToCleanup = new Set();
+
+function cleanupTempDirs() {
+  tempDirsToCleanup.forEach(function(dir) {
+    try {
+      if (fs.existsSync(dir)) {
+        console.log('[Sentinel] Cleaning up temp profile: ' + dir);
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      }
+      tempDirsToCleanup.delete(dir);
+    } catch (err) {
+      console.warn('[Sentinel] Failed to cleanup ' + dir + ': ' + err.message);
+    }
+  });
+}
+
+// Graceful shutdown on SIGINT/SIGTERM
+process.on('SIGINT', function() {
+  console.log('\n[Sentinel] Received SIGINT, cleaning up...');
+  cleanupTempDirs();
+  process.exit(0);
+});
+
+process.on('SIGTERM', function() {
+  console.log('\n[Sentinel] Received SIGTERM, cleaning up...');
+  cleanupTempDirs();
+  process.exit(0);
+});
+
+// ═══════════════════════════════════════════
+//  CLI ARGUMENT PARSING (v6.4 compatible)
+// ═══════════════════════════════════════════
 var args = process.argv.slice(2);
-var TARGET = args[0] || DEFAULT_TARGET;
-var MODE = (args[1] || 'stealth').toLowerCase();
-var TIMEOUT = parseInt(args[2]) || DEFAULT_TIMEOUT;
+var target = args.find(function(a) { return a.startsWith('http'); }) || null;
+var dualMode = args.indexOf('--dual-mode') !== -1;
+var headless = args.indexOf('--no-headless') === -1;
+var stealthEnabled = args.indexOf('--no-stealth') === -1;
 
-if (MODE !== 'stealth' && MODE !== 'observe') {
-  process.stderr.write('Usage: node index.js [url] [stealth|observe] [timeout_ms]\n');
-  process.exit(1);
+var timeout = 60000;
+var waitTime = 30000;
+var userPersistDir = '';
+
+for (var ai = 0; ai < args.length; ai++) {
+  if (args[ai].startsWith('--timeout=')) timeout = parseInt(args[ai].split('=')[1]) || 60000;
+  if (args[ai].startsWith('--wait='))    waitTime = parseInt(args[ai].split('=')[1]) || 30000;
+  if (args[ai].startsWith('--persist=')) userPersistDir = args[ai].split('=')[1] || '';
+}
+
+if (!target) {
+  console.log('\n\uD83D\uDEE1\uFE0F  ' + VERSION + ' \u2014 Hybrid Dual-Telemetry Forensic CCTV\n');
+  console.log('Usage: node index.js <URL> [options]\n');
+  console.log('Options:');
+  console.log('  --dual-mode        Run both observe and stealth passes');
+  console.log('  --no-headless      Visible browser');
+  console.log('  --no-stealth       Disable stealth plugin (for comparison)');
+  console.log('  --timeout=<ms>     Navigation timeout (default: 60000)');
+  console.log('  --wait=<ms>        Post-load wait time (default: 30000)');
+  console.log('  --persist=<dir>    Persistent browser profile directory (optional)');
+  console.log('                     If not specified, auto-generates temp profile and cleans up after scan\n');
+  console.log('Examples:');
+  console.log('  node index.js https://browserscan.net --dual-mode --no-headless');
+  console.log('  node index.js https://example.com --persist=./profiles/session1 --no-headless');
+  console.log('  node index.js https://example.com --no-headless');
+  console.log('  node index.js https://browserscan.net --dual-mode --no-headless --timeout=60000 --wait=30000\n');
+  process.exit(0);
 }
 
 // ═══════════════════════════════════════════
-//  MAIN EXECUTION
+//  SCAN FUNCTION (called per mode)
 // ═══════════════════════════════════════════
-(async function main() {
+async function runScan(mode) {
   var ts = Date.now();
-  var profileDir = path.join(PROFILE_BASE, 'profile-' + ts);
 
-  process.stderr.write('\n');
-  process.stderr.write('═══════════════════════════════════════════════════════════\n');
-  process.stderr.write('  ' + VERSION + ' — Hybrid Dual-Telemetry CCTV\n');
-  process.stderr.write('  Target: ' + TARGET + '\n');
-  process.stderr.write('  Mode: ' + MODE + ' | Timeout: ' + TIMEOUT + 'ms\n');
-  process.stderr.write('═══════════════════════════════════════════════════════════\n\n');
+  // ─── Determine profile directory ───
+  var persistDir;
+  var isAutoGenerated = false;
+
+  if (userPersistDir) {
+    persistDir = path.resolve(userPersistDir);
+    console.log('[Sentinel] Using user-specified profile: ' + persistDir);
+  } else {
+    var tempPrefix = path.join(os.tmpdir(), 'sentinel-profile-' + mode + '-');
+    persistDir = fs.mkdtempSync(tempPrefix);
+    isAutoGenerated = true;
+    tempDirsToCleanup.add(persistDir);
+    console.log('[Sentinel] Auto-generated temp profile: ' + persistDir);
+  }
 
   // ─── L1: PIPELINE INITIALIZATION ───
   var pipeline = new EventPipeline({ maxBuffer: 100000 });
-  process.stderr.write('[L1] Pipeline initialized\n');
+  console.log('[L1] Pipeline initialized');
 
-  // ─── L2: STEALTH PLUGIN (REG-028: rebrowser-patched core) ───
-  var stealth = createStealthPlugin();
-  chromium.use(stealth);
-  process.stderr.write('[L2] Stealth plugin loaded (17 evasions)\n');
+  // ─── L2: STEALTH PLUGIN (conditional per mode) ───
+  var chromium = addExtra(playwrightCore.chromium);
+  var useStealthForThisMode = stealthEnabled && (mode === 'stealth');
 
-  // ─── L1: PERSISTENT BROWSER LAUNCH (REG-022, REG-027) ───
+  if (useStealthForThisMode) {
+    var stealth = StealthPlugin();
+    chromium.use(stealth);
+    console.log('[L2] Stealth plugin loaded (17 evasions)');
+  } else {
+    console.log('[L2] Stealth plugin DISABLED (mode: ' + mode + ')');
+  }
+
+  // ─── L1: PERSISTENT BROWSER LAUNCH (REG-022) ───
+  var launchArgs = [
+    '--disable-blink-features=AutomationControlled',
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-infobars',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-ipc-flooding-protection',
+    '--disable-session-crashed-bubble',
+    '--disable-features=TranslateUI',
+    '--enable-features=NetworkService,NetworkServiceInProcess'
+  ];
+
   var launchOpts = {
-    headless: false,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-infobars',
-      '--disable-session-crashed-bubble',
-      '--disable-features=TranslateUI'
-    ]
+    headless: headless,
+    args: launchArgs,
+    ignoreDefaultArgs: ['--enable-automation'],
+    viewport: null
   };
 
-  process.stderr.write('[L1] Launching persistent context: ' + profileDir + '\n');
-  var context = await chromium.launchPersistentContext(profileDir, launchOpts);
-  process.stderr.write('[L1] Browser launched (persistentContext)\n');
+  console.log('[L1] Launching browser (mode: ' + mode + ', headless: ' + headless + ')...');
 
-  var browser = null;
+  var context;
+  try {
+    context = await chromium.launchPersistentContext(persistDir, launchOpts);
+  } catch (err) {
+    console.error('[Sentinel] Failed to launch browser: ' + err.message);
+    if (isAutoGenerated && fs.existsSync(persistDir)) {
+      fs.rmSync(persistDir, { recursive: true, force: true });
+      tempDirsToCleanup.delete(persistDir);
+    }
+    throw err;
+  }
+  console.log('[L1] Browser launched (persistentContext)');
+
   var page = null;
 
   try {
@@ -114,26 +218,23 @@ if (MODE !== 'stealth' && MODE !== 'observe') {
     var pages = context.pages();
     page = pages.length > 0 ? pages[0] : await context.newPage();
 
-    // ─── L3: addInitScript INJECTION (REG-001: PRIMARY injection) ───
-    // Shield MUST be injected FIRST (provides hook utilities)
+    // ─── L3: addInitScript INJECTION (REG-001) ───
     await context.addInitScript({ content: getShieldScript() });
-    process.stderr.write('[L3] Shield injected via addInitScript\n');
+    console.log('[L3] Shield injected via addInitScript');
 
-    // Interceptor injected SECOND (uses shield utilities)
     await context.addInitScript({ content: getInterceptorScript({
-      timeout: TIMEOUT,
+      timeout: waitTime,
       maxEvents: 50000,
       pushInterval: 500
     }) });
-    process.stderr.write('[L3] Interceptor injected (42 categories, 110+ hooks)\n');
+    console.log('[L3] Interceptor injected (42 categories, 110+ hooks)');
 
     // ─── L4: CDP SESSION + RUNTIME BINDING ───
     var cdp = await context.newCDPSession(page);
-    process.stderr.write('[L4] CDP session established\n');
+    console.log('[L4] CDP session established');
 
-    // Runtime.addBinding for push telemetry from hooks
     await cdp.send('Runtime.addBinding', { name: 'SENTINEL_PUSH' });
-    process.stderr.write('[L4] SENTINEL_PUSH binding registered\n');
+    console.log('[L4] SENTINEL_PUSH binding registered');
 
     // ─── L5: PUSH TELEMETRY RECEIVER ───
     cdp.on('Runtime.bindingCalled', function(params) {
@@ -144,103 +245,76 @@ if (MODE !== 'stealth' && MODE !== 'observe') {
             pipeline.pushBatchHook(payload.events);
           }
         } catch (e) {
-          process.stderr.write('[L5] Push parse error: ' + e.message + '\n');
+          console.warn('[L5] Push parse error: ' + e.message);
         }
       }
     });
-    process.stderr.write('[L5] Push telemetry receiver active (500ms interval)\n');
+    console.log('[L5] Push telemetry receiver active (500ms interval)');
 
-    // ─── L9: CDP OBSERVER ENGINE (REG-026: ALL domains enabled) ───
+    // ─── L9: CDP OBSERVER ENGINE (REG-026) ───
     var observer = new CdpObserverEngine(pipeline, cdp);
     await observer.start();
-    process.stderr.write('[L9] CDP observer started (Network, Page, Security, Console, DOM, Performance, Runtime)\n');
+    console.log('[L9] CDP observer started (Network, Page, Security, Console, DOM, Performance, Runtime)');
 
     // ─── L6: TARGET GRAPH — Recursive Auto-Attach (REG-016) ───
     var targetGraph = new TargetGraph(pipeline, cdp, context);
     await targetGraph.start();
-    process.stderr.write('[L6] TargetGraph started (recursive auto-attach)\n');
+    console.log('[L6] TargetGraph started (recursive auto-attach)');
 
     // ─── L8: FRAME LIFECYCLE HANDLERS (REG-006, REG-007) ───
     page.on('frameattached', function(frame) {
-      pipeline.pushPage({
-        cat: 'frame-lifecycle',
-        api: 'frameattached-pw',
-        risk: 'info',
-        detail: 'PW frameattached: ' + (frame.url() || 'about:blank')
-      });
+      pipeline.pushPage({ cat: 'frame-lifecycle', api: 'frameattached-pw', risk: 'info', detail: 'PW frameattached: ' + (frame.url() || 'about:blank') });
     });
     page.on('framenavigated', function(frame) {
-      pipeline.pushPage({
-        cat: 'frame-lifecycle',
-        api: 'framenavigated-pw',
-        risk: 'info',
-        detail: 'PW framenavigated: ' + frame.url()
-      });
+      pipeline.pushPage({ cat: 'frame-lifecycle', api: 'framenavigated-pw', risk: 'info', detail: 'PW framenavigated: ' + frame.url() });
     });
     page.on('framedetached', function(frame) {
-      pipeline.pushPage({
-        cat: 'frame-lifecycle',
-        api: 'framedetached-pw',
-        risk: 'info',
-        detail: 'PW framedetached'
-      });
+      pipeline.pushPage({ cat: 'frame-lifecycle', api: 'framedetached-pw', risk: 'info', detail: 'PW framedetached' });
     });
-    process.stderr.write('[L8] Frame lifecycle handlers registered\n');
+    console.log('[L8] Frame lifecycle handlers registered');
 
     // ─── L10: BIDIRECTIONAL NETWORK CAPTURE ───
     page.on('request', function(req) {
-      pipeline.pushPage({
-        cat: 'network-request',
-        api: req.method(),
-        risk: 'info',
-        detail: req.method() + ' ' + req.url().slice(0, 300),
-        meta: { type: req.resourceType(), url: req.url() }
-      });
+      pipeline.pushPage({ cat: 'network-request', api: req.method(), risk: 'info', detail: req.method() + ' ' + req.url().slice(0, 300), meta: { type: req.resourceType(), url: req.url() } });
     });
     page.on('response', function(resp) {
-      pipeline.pushPage({
-        cat: 'network-response',
-        api: String(resp.status()),
-        risk: resp.status() >= 400 ? 'high' : 'info',
-        detail: resp.status() + ' ' + resp.url().slice(0, 300),
-        meta: { status: resp.status(), url: resp.url() }
-      });
+      pipeline.pushPage({ cat: 'network-response', api: String(resp.status()), risk: resp.status() >= 400 ? 'high' : 'info', detail: resp.status() + ' ' + resp.url().slice(0, 300), meta: { status: resp.status(), url: resp.url() } });
     });
-    process.stderr.write('[L10] Bidirectional network capture active\n');
+    console.log('[L10] Bidirectional network capture active');
 
     // ─── NAVIGATE TO TARGET ───
-    process.stderr.write('\n[NAV] Navigating to ' + TARGET + '...\n');
-    await page.goto(TARGET, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-    process.stderr.write('[NAV] Page loaded, waiting ' + TIMEOUT + 'ms for activity...\n');
+    console.log('\n[NAV] Navigating to ' + target + '...');
+    try {
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: timeout });
+    } catch (e) {
+      console.warn('[NAV] Navigation warning: ' + e.message);
+    }
 
     // ─── WAIT FOR ACTIVITY ───
-    await new Promise(function(resolve) { setTimeout(resolve, TIMEOUT); });
+    console.log('[NAV] Observing for ' + (waitTime / 1000) + 's...');
+    await new Promise(function(resolve) { setTimeout(resolve, waitTime); });
 
-    // ─── L5: FINAL FLUSH (REG-021) ───
+    // ─── L5: Final flush (REG-021) ───
     try {
       await page.evaluate(function() {
         if (typeof window._SENTINEL_DATA !== 'undefined' && typeof window.SENTINEL_PUSH === 'function') {
           var lastIdx = window._SENTINEL_DATA._lastPushIndex || 0;
           var batch = window._SENTINEL_DATA.events.slice(lastIdx);
           if (batch.length > 0) {
-            window.SENTINEL_PUSH(JSON.stringify({
-              type: 'events',
-              count: batch.length,
-              total: window._SENTINEL_DATA.events.length,
-              events: batch,
-              frame: window._SENTINEL_DATA.frameType,
-              ts: Date.now()
-            }));
+            window.SENTINEL_PUSH(JSON.stringify({ type: 'events', count: batch.length, total: window._SENTINEL_DATA.events.length, events: batch, frame: window._SENTINEL_DATA.frameType, ts: Date.now() }));
           }
         }
       });
     } catch (e) {
-      process.stderr.write('[L5] Final flush warning: ' + e.message + '\n');
+      console.warn('[L5] Final flush warning: ' + e.message);
     }
-    process.stderr.write('[L5] Final event flush completed\n');
-
-    // Small wait for final push to arrive
+    console.log('[L5] Final flush completed');
     await new Promise(function(resolve) { setTimeout(resolve, 500); });
+
+    // ─── Collect frame tree from Playwright ───
+    var pwFrames = page.frames().map(function(f) {
+      return { url: f.url(), name: f.name(), detached: f.isDetached() };
+    });
 
     // ─── L11: PARALLEL COLLECTION + MERGE (REG-018) ───
     var events = pipeline.drain();
@@ -248,33 +322,37 @@ if (MODE !== 'stealth' && MODE !== 'observe') {
     var frames = observer.getFrames();
     var tgStats = targetGraph.getStats();
 
-    process.stderr.write('\n[L11] Collection complete:\n');
-    process.stderr.write('  Total events (deduped): ' + events.length + '\n');
-    process.stderr.write('  Hook events: ' + pStats.hookEvents + '\n');
-    process.stderr.write('  CDP events: ' + pStats.cdpEvents + '\n');
-    process.stderr.write('  Page events: ' + pStats.pageEvents + '\n');
-    process.stderr.write('  Frames: ' + frames.length + '\n');
-    process.stderr.write('  Targets: ' + tgStats.discovered + ' discovered, ' + tgStats.attached + ' attached\n');
+    console.log('\n[L11] Collection complete:');
+    console.log('  Total events (deduped): ' + events.length);
+    console.log('  Hook events: ' + pStats.hookEvents);
+    console.log('  CDP events: ' + pStats.cdpEvents);
+    console.log('  Page events: ' + pStats.pageEvents);
+    console.log('  Frames: ' + frames.length + ' (CDP) + ' + pwFrames.length + ' (PW)');
+    console.log('  Targets: ' + tgStats.discovered + ' discovered, ' + tgStats.attached + ' attached');
 
     // ─── L11: ANALYSIS ───
     var engine = new CorrelationEngine(VERSION);
-    var analysis = engine.analyze(events, frames, pStats);
-
-    var catCount = analysis.categories.length;
-    process.stderr.write('  Categories detected: ' + catCount + '\n');
-    process.stderr.write('  Risk score: ' + analysis.riskScore + '\n');
+    var analysis = engine.analyze(events, frames.concat(pwFrames), pStats);
+    console.log('  Categories detected: ' + analysis.categoryCount);
+    console.log('  Risk score: ' + analysis.riskScore);
 
     // ─── BUILD CONTEXT ───
     var contextData = {
       version: VERSION,
-      target: TARGET,
-      mode: MODE,
+      target: target,
+      mode: mode,
       scanDate: new Date(ts).toISOString(),
-      timeout: TIMEOUT,
+      timeout: timeout,
+      waitTime: waitTime,
+      headless: headless,
+      stealthEnabled: useStealthForThisMode,
+      persistentContext: true,
+      profileDirectory: persistDir,
+      autoGenerated: isAutoGenerated,
       engine: 'hybrid-dual-telemetry',
       layers: {
         L1: 'persistentContext + auto-cleanup',
-        L2: 'stealth-plugin (17 evasions) + rebrowser-patches',
+        L2: useStealthForThisMode ? 'stealth-plugin (17 evasions) + rebrowser-patches' : 'rebrowser-patches only (no stealth)',
         L3: 'addInitScript (shield + interceptor, 42 categories)',
         L4: 'CDP session + Runtime.addBinding',
         L5: 'Push telemetry (500ms interval)',
@@ -288,46 +366,86 @@ if (MODE !== 'stealth' && MODE !== 'observe') {
       },
       pipelineStats: pStats,
       targetGraphStats: tgStats,
+      pwFrames: pwFrames,
       categoriesMonitored: 42,
-      hookPoints: analysis.hookStats ? (analysis.hookStats.hookEventCount > 0 ? '110+' : '0') : '0',
-      categoryCoverage: ((catCount / 42) * 100).toFixed(1) + '%'
+      categoryCoverage: ((analysis.categoryCount / 42) * 100).toFixed(1) + '%'
     };
 
     // ─── L12: REPORT GENERATION ───
     var reporter = new ReportGenerator(VERSION);
-    var paths = reporter.save(MODE, ts, events, analysis, contextData);
+    var paths = reporter.save(mode, ts, events, analysis, contextData);
 
-    process.stderr.write('\n[L12] Reports generated:\n');
-    process.stderr.write('  JSON: ' + paths.json + '\n');
-    process.stderr.write('  HTML: ' + paths.html + '\n');
-    process.stderr.write('  CTX:  ' + paths.context + '\n');
+    console.log('\n[L12] Reports generated:');
+    console.log('  JSON: ' + paths.json);
+    console.log('  HTML: ' + paths.html);
+    console.log('  CTX:  ' + paths.context);
 
     // ─── SUMMARY ───
-    process.stderr.write('\n═══════════════════════════════════════════════════════════\n');
-    process.stderr.write('  SCAN COMPLETE\n');
-    process.stderr.write('  Events: ' + events.length + ' (hook:' + pStats.hookEvents + ' + cdp:' + pStats.cdpEvents + ' + page:' + pStats.pageEvents + ')\n');
-    process.stderr.write('  Categories: ' + catCount + '/42 (' + contextData.categoryCoverage + ')\n');
-    process.stderr.write('  Risk Score: ' + analysis.riskScore + '/100\n');
-    process.stderr.write('  Libraries: ' + analysis.libraryDetections.length + '\n');
-    process.stderr.write('═══════════════════════════════════════════════════════════\n');
+    console.log('\n' + '='.repeat(59));
+    console.log('  SCAN COMPLETE [' + mode.toUpperCase() + ']');
+    console.log('  Events: ' + events.length + ' (hook:' + pStats.hookEvents + ' + cdp:' + pStats.cdpEvents + ' + page:' + pStats.pageEvents + ')');
+    console.log('  Categories: ' + analysis.categoryCount + '/42 (' + contextData.categoryCoverage + ')');
+    console.log('  Risk Score: ' + analysis.riskScore + '/100');
+    console.log('  Libraries: ' + analysis.libraryDetections.length);
+    console.log('='.repeat(59));
+
+    return { reportPath: paths, stats: analysis };
 
   } catch (err) {
-    process.stderr.write('\n[ERROR] ' + err.message + '\n');
-    process.stderr.write(err.stack + '\n');
+    console.error('\n[ERROR] ' + err.message);
+    console.error(err.stack);
   } finally {
     // Close browser
-    try {
-      await context.close();
-    } catch (e) {}
+    try { await context.close(); } catch (e) {}
 
     // ─── REG-027: Auto-cleanup persistent context ───
-    if (CLEANUP_PROFILE) {
+    if (isAutoGenerated && CLEANUP_PROFILE) {
       try {
-        fs.rmSync(profileDir, { recursive: true, force: true });
-        process.stderr.write('[CLEANUP] Profile removed: ' + profileDir + '\n');
+        if (fs.existsSync(persistDir)) {
+          console.log('[CLEANUP] Removing auto-generated temp profile: ' + persistDir);
+          fs.rmSync(persistDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        }
+        tempDirsToCleanup.delete(persistDir);
       } catch (e) {
-        process.stderr.write('[CLEANUP] Warning: ' + e.message + '\n');
+        console.warn('[CLEANUP] Warning: ' + e.message);
       }
     }
+  }
+}
+
+// ═══════════════════════════════════════════
+//  MAIN EXECUTION
+// ═══════════════════════════════════════════
+(async function main() {
+  console.log('\n' + '='.repeat(59));
+  console.log('  ' + VERSION + ' — Hybrid Dual-Telemetry Forensic CCTV');
+  console.log('  rebrowser-playwright: Runtime.Enable PATCHED (' + process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE + ')');
+  console.log('  Target: ' + target);
+  console.log('  Mode: ' + (dualMode ? 'DUAL (observe -> stealth)' : 'stealth'));
+  console.log('  Headless: ' + headless);
+  console.log('  Stealth: ' + (stealthEnabled ? 'ON' : 'OFF'));
+  console.log('  Timeout: ' + timeout + 'ms | Wait: ' + waitTime + 'ms');
+  console.log('  Persist: ' + (userPersistDir || 'auto-generated temp (with cleanup)'));
+  console.log('='.repeat(59) + '\n');
+
+  try {
+    if (dualMode) {
+      console.log('=== PASS 1: OBSERVE MODE (no stealth plugin) ===');
+      await runScan('observe');
+      console.log('\n=== PASS 2: STEALTH MODE ===');
+      await runScan('stealth');
+      console.log('\n\u2705 Dual-mode scan complete.');
+    } else {
+      await runScan('stealth');
+      console.log('\n\u2705 Scan complete.');
+    }
+
+    // Final cleanup
+    cleanupTempDirs();
+  } catch (err) {
+    console.error('\u274C Fatal error: ' + err.message);
+    console.error(err.stack);
+    cleanupTempDirs();
+    process.exit(1);
   }
 })();
