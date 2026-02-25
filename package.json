@@ -1,7 +1,7 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "6.3.0",
-  "description": "Sentinel v6.3.0 — Pure Observer CCTV. Zero Injection. Zero Spoofing. Full CDP Telemetry.",
+  "version": "6.4.0",
+  "description": "Sentinel v6.4.0 — Pure Observer CCTV with Auto-Cleanup. Zero Injection. Zero Spoofing. No Incognito Detection.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
