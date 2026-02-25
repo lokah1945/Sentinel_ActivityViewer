@@ -1,115 +1,110 @@
-# 🛡️ Sentinel v3.0 — Maling Catcher
+# 🛡️ Sentinel v5.0.0 — Unified Forensic Engine
 
-**Browser Activity Viewer with Stealth Mode** — Detects and reports all fingerprinting, tracking, and suspicious browser API activity from any website.
+> **Zero Spoofing | Zero Blind Spot | Zero Regression**
 
-## 🚀 Quick Start
+Sentinel adalah alat forensik browser yang memantau dan merekam semua aktivitas fingerprinting yang dilakukan oleh website terhadap browser Anda. Versi 5.0.0 adalah unifikasi seluruh fitur dari v3.0 hingga v4.6.3.
+
+## Fitur Utama
+
+- **42 Kategori Deteksi** — Canvas, WebGL, Audio, Font, WebRTC, Math, Battery, dll
+- **110+ Hook Points** — Monitoring komprehensif terhadap semua API browser
+- **Bidirectional Network Capture** — Rekam request DAN response (full conversation)
+- **Recursive Auto-Attach** — Monitor nested iframe dan worker secara otomatis
+- **Worker Pipeline** — Tangkap aktivitas di Web Worker, Shared Worker, Service Worker
+- **Quiet Mode** — Non-enumerable globals, zero console output, marker randomization
+- **Zero Spoofing** — Tidak ada pemalsuan UA/WebGL/timezone, hanya cleanup marker otomasi
+- **HTML Dashboard** — Report forensik dengan dark theme, 1H5W analysis, threat assessment
+- **25 Regression Rules** — Test otomatis yang mencegah fitur hilang saat upgrade
+
+## Instalasi
 
 ```bash
-# Install dependencies
+# Ekstrak ZIP
+unzip sentinel-v5.0.0.zip
+cd sentinel-v5.0.0
+
+# Install dependencies (hanya playwright)
 npm install
-
-# Interactive mode (akan minta input URL)
-npm start
-
-# Quick scan dengan stealth (default)
-node index.js browserscan.net
-
-# Observe mode (tanpa stealth, deteksi mentah)
-node index.js browserscan.net --observe
-
-# Dual mode (jalankan kedua mode & bandingkan hasilnya)
-node index.js browserscan.net --dual-mode
-
-# Custom timeout (default 30s)
-node index.js browserscan.net --timeout=45000
-
-# Headless mode
-node index.js browserscan.net --headless
 ```
 
-## 🏗️ Architecture
+## Penggunaan
+
+```bash
+# Scan default (stealth mode, headless)
+node index.js https://www.browserscan.net
+
+# Tampilkan browser
+node index.js https://www.browserscan.net --no-headless
+
+# Dual mode (observe → stealth comparison)
+node index.js https://www.browserscan.net --dual-mode --no-headless
+
+# Observe mode
+node index.js https://www.browserscan.net --observe --no-headless
+
+# Verbose (debug target graph)
+node index.js https://www.browserscan.net --verbose --no-headless
+
+# Custom locale & timezone
+node index.js https://www.browserscan.net --locale=id --timezone=Asia/Jakarta
+```
+
+## Test Suite
+
+```bash
+# Regression gate (25 rules dari bug historis v3-v4.6.3)
+npm test
+
+# Stress test (1000 iterasi)
+npm run test:stress
+
+# Injection diagnostic (butuh browser)
+npm run test:injection
+
+# Full test suite
+npm run test:full
+```
+
+## Struktur File
 
 ```
-sentinel_v3/
-├── index.js                    # CLI entry point
-├── package.json
+sentinel-v5.0.0/
+├── index.js                    # Main orchestrator (10-layer pipeline)
 ├── hooks/
-│   ├── stealth-config.js       # Stealth plugin + extra hardening
-│   └── api-interceptor.js      # 18-category API hook engine
+│   ├── api-interceptor.js      # 42 kategori, 110+ hooks, smartHookGetter
+│   ├── anti-detection-shield.js # Shield + Quiet Mode + WeakMap cache
+│   └── stealth-config.js       # MINIMAL (<80 lines) automation cleanup
+├── lib/
+│   ├── target-graph.js         # Recursive auto-attach + Worker pipeline
+│   ├── correlation-engine.js   # Burst/slow-probe/cross-frame analysis
+│   └── signature-db.js         # FPv5/CreepJS/BotD pattern matching
 ├── reporters/
-│   └── report-generator.js     # JSON + HTML + Context Map generator
-├── output/                     # Scan results saved here
+│   └── report-generator.js     # JSON + HTML + CTX unified report
+├── tests/
+│   ├── test-regression.js      # 25 regression rules
+│   ├── test-stress.js          # 1000-iteration stress test
+│   └── test-injection.js       # Quick browser diagnostic
+├── package.json
+├── CHANGELOG.md
 └── README.md
 ```
 
-## 🔍 18 Monitored Categories
+## Output
 
-| Category | APIs Hooked | Risk |
-|----------|-------------|------|
-| Canvas | toDataURL, toBlob, getImageData, fillText, isPointInPath | 🔴 HIGH |
-| WebGL | getParameter, getExtension, getSupportedExtensions, getShaderPrecisionFormat, readPixels | 🔴 HIGH |
-| Audio | OfflineAudioContext, createOscillator, createDynamicsCompressor, createAnalyser, baseLatency | 🔴 CRITICAL |
-| Font Detection | measureText, document.fonts.check, getBoundingClientRect, offsetWidth | 🔴 HIGH |
-| Fingerprint | userAgent, platform, languages, hardwareConcurrency, deviceMemory, plugins, matchMedia | 🔴 HIGH |
-| Math Fingerprint | acos, acosh, asin, sinh, cos, tan, exp, expm1, log1p (15 functions) | 🟡 HIGH |
-| Permissions | navigator.permissions.query | 🔴 HIGH |
-| Storage | cookie get/set, localStorage, sessionStorage, indexedDB | 🟡 MEDIUM |
-| Screen | width, height, colorDepth, pixelDepth, availWidth, devicePixelRatio | 🟡 MEDIUM |
-| Network | fetch, XMLHttpRequest, sendBeacon | 🟡 MEDIUM |
-| WebRTC | RTCPeerConnection | 🔴 CRITICAL |
-| Performance | getEntries, getEntriesByType, performance.now | 🟡 MEDIUM |
-| Media Devices | enumerateDevices | 🔴 CRITICAL |
-| DOM Probe | createElement (canvas/iframe/audio/video) | 🟡 MEDIUM |
-| Clipboard | readText, writeText | 🔴 CRITICAL |
-| Geolocation | getCurrentPosition, watchPosition | 🔴 CRITICAL |
-| Service Worker | register | 🔴 HIGH |
-| Hardware | getBattery, timezone, architecture | 🟡 MEDIUM |
+Setelah scan, folder `./output` berisi:
+- `sentinel-{mode}-{timestamp}-report.json` — Data forensik lengkap
+- `sentinel-{mode}-{timestamp}-report.html` — Dashboard visual (dark theme)
+- `sentinel-{mode}-{timestamp}-context.json` — Frame & injection metadata
 
-## 🥷 Stealth Mode
+## 3 Aturan Emas (Anti-Regresi)
 
-Stealth mode uses **17 evasion techniques** from `puppeteer-extra-plugin-stealth`:
+1. **JANGAN PERNAH rewrite file dari nol** — Selalu mulai dari yang sudah bekerja
+2. **JANGAN PERNAH hapus hook tanpa menambah test regression rule**
+3. **JALANKAN `npm test` sebelum setiap deploy** — Semua 25 rule harus PASS
 
-- `chrome.app` / `chrome.csi` / `chrome.loadTimes` / `chrome.runtime`
-- `navigator.webdriver` / `navigator.plugins` / `navigator.vendor` / `navigator.permissions` / `navigator.languages` / `navigator.hardwareConcurrency`
-- `user-agent-override` / `media.codecs`
-- `iframe.contentWindow` / `window.outerdimensions`
-- `webgl.vendor` / `sourceurl` / `defaultArgs`
+## Dependency
 
-**Plus Extra Stealth Layer:**
-- Deep webdriver property cleanup
-- Permissions API spoofing
-- Chrome runtime emulation
-- Connection API spoofing
-- Stack trace cleanup (removes playwright/puppeteer traces)
-- Notification permission normalization
-
-## 🔄 Dual Mode
-
-Run `--dual-mode` to execute both STEALTH and OBSERVE scans, then compare:
-
-```
-  📊 DUAL MODE COMPARISON
-  Metric                    STEALTH         OBSERVE
-  ───────────────────────────────────────────────
-  Risk Score                62              48
-  Total Events              1247            869
-  Categories                14              9
-```
-
-This reveals whether the target website **behaves differently** when it detects automation.
-
-## 📊 Output
-
-Each scan generates 3 files in `./output/`:
-- `*_report.json` — Structured metrics, threats, risk score
-- `*_report.html` — Visual dashboard with threat assessment
-- `*_context-map.json` — Frame/origin hierarchy
-
-## ⚠️ FingerprintJS v5 Detection
-
-Sentinel v3 automatically detects the **FingerprintJS v5 signature** pattern:
-- Canvas `isPointInPath` + audio fingerprinting + font detection + math fingerprinting
-- Triggers a CRITICAL threat alert when detected
+Hanya **playwright** — tidak ada playwright-extra atau puppeteer-extra-plugin-stealth.
 
 ## License
 
