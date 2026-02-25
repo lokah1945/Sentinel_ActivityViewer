@@ -1,37 +1,41 @@
 // ═══════════════════════════════════════════════════════════════
-// SENTINEL v5.1.0 — UNIFIED FORENSIC ENGINE (INVISIBLE EDITION)
-// Main Orchestrator — 10-Layer Pipeline
+// SENTINEL v6.0.0 — DUAL-LAYER FORENSIC ENGINE (PATCHRIGHT + CDP COLLECTORS)
+// Main Orchestrator
 // ═══════════════════════════════════════════════════════════════
-// CHANGE LOG v5.1.0 (2026-02-25):
-//   FROM v5.0.0:
-//   - FIX: outerWidth 160→1296, outerHeight 28→real via --window-size
-//   - FIX: CDP Page.addScriptToEvaluateOnNewDocument for webdriver=undefined
-//          BEFORE any page script (earlier than addInitScript)
-//   - FIX: Removed playwright-extra (conflicts with persistent context native chrome)
-//   - FIX: Human-like behavior (random mouse, variable scroll, delays)
-//   - FIX: console.debug CDP leak patched in stealth-config
-//   FROM v5.1.0-beta:
-//   - FIX: Removed outerHeight override from stealth-config (caused 788 vs 808 inconsistency)
-//   - FIX: Back to plain 'playwright' dependency (per v5.0 blueprint)
-//   - FIX: Trust real window dimensions from --window-size, no JS override
+// CHANGE LOG v6.0.0 (2026-02-25):
+//   FROM v5.1.0-Final:
+//   - CHANGED: require('playwright') → require('patchright')
+//     Patchright is a drop-in replacement that eliminates Runtime.enable CDP leak,
+//     Console.enable leak, and --enable-automation flag leak.
+//   - ADDED: CDP Network Collector (out-of-page network monitoring with initiator
+//     chains, WebSocket frame capture, SSE capture, cookie tracking, TLS info)
+//   - ADDED: CDP Security Collector (TLS state, certificate errors)
+//   - ADDED: EventPipeline (real-time event streaming backbone)
+//   - ADDED: Pipeline integrates both CDP collector events AND in-page hook events
+//   - REMOVED: L1.5 CDP webdriver fix (Patchright handles this internally)
+//   - REMOVED: CDP_WEBDRIVER_SCRIPT (no longer needed)
+//   - FIX: v5.1.0-Final imported generateInterceptorScript but api-interceptor.js
+//     exported getInterceptorScript — MISMATCH. v6 uses the correct v5.0.0
+//     api-interceptor.js which exports generateInterceptorScript.
+//   - CHANGED: version banner to v6.0.0
 //
 // LAST HISTORY LOG:
 //   v5.0.0: First unified engine, 42 categories, 110+ hooks, 25 regression rules
 //   v5.1.0-beta: Added playwright-extra + stealth plugin, outerDimensions override
 //   v5.1.0: Removed playwright-extra, fixed CDP leak, trust real dimensions
+//   v5.1.0-Final: Removed cross-frame inconsistency overrides, CDP console.debug fix
+//   v6.0.0: Patchright + CDP collectors + EventPipeline, removed legacy CDP fixes
 //
-// UNCHANGED from v5.0.0:
-//   - 10-layer pipeline (L1-L10)
-//   - All contracts C-IDX-01 through C-IDX-14
-//   - hooks/api-interceptor.js (42 categories, 110+ hooks)
-//   - hooks/anti-detection-shield.js (WeakMap cache, Quiet Mode)
-//   - lib/target-graph.js (Recursive auto-attach, Worker Pipeline)
-//   - lib/correlation-engine.js (Burst/slow-probe analysis)
-//   - lib/signature-db.js (Library attribution)
-//   - reporters/report-generator.js (JSON + HTML + CTX)
-//   - tests/* (25 regression rules, 1000-iteration stress test)
-//
-// Zero Spoofing | Zero Blind Spot | Zero Regression | INVISIBLE
+// ARCHITECTURE:
+//   L1: Persistent Browser Launch (Patchright)
+//   L2: addInitScript injection (Shield → Stealth → Interceptor)
+//   L3: CDP Session + Push Telemetry + CDP Collectors
+//   L4-L5: TargetGraph + Worker Pipeline
+//   L6: Frame Lifecycle Handlers
+//   L7: Navigate & Observe (human-like behavior)
+//   L8: Dual-Layer Network Capture (CDP primary + Playwright supplementary)
+//   L9: Parallel Collection (main frame + sub-frames + workers + CDP events)
+//   L10: Unified Report Generation
 // ═══════════════════════════════════════════════════════════════
 
 var os = require('os');
@@ -39,16 +43,18 @@ var fs = require('fs');
 var path = require('path');
 var crypto = require('crypto');
 
-// v5.1: BACK TO plain playwright (per v5.0 blueprint)
-// Persistent context + --use-gl=desktop provides REAL chrome.runtime, chrome.csi, chrome.loadTimes
-// playwright-extra stealth plugin CONFLICTS with these native objects
-var { chromium } = require('playwright');
+// v6.0.0: Patchright — drop-in replacement for Playwright
+// Eliminates Runtime.enable leak, Console.enable leak, --enable-automation
+var { chromium } = require('patchright');
 
 var { generateShieldScript } = require('./hooks/anti-detection-shield');
 var { generateStealthScript } = require('./hooks/stealth-config');
 var { generateInterceptorScript } = require('./hooks/api-interceptor');
 var { TargetGraph } = require('./lib/target-graph');
 var { generateReports } = require('./reporters/report-generator');
+var { EventPipeline } = require('./lib/event-pipeline');
+var { CDPNetworkCollector } = require('./collectors/cdp-network-collector');
+var { CDPSecurityCollector } = require('./collectors/cdp-security-collector');
 
 // ─── CLI Argument Parsing ───
 var args = process.argv.slice(2);
@@ -64,8 +70,7 @@ var OUTPUT_DIR = args.find(function(a) { return a.startsWith('--output='); })?.s
 var localeArg = args.find(function(a) { return a.startsWith('--locale='); });
 var timezoneArg = args.find(function(a) { return a.startsWith('--timezone='); });
 
-// ─── v5.1 Viewport Config ───
-// DO NOT override outerWidth/outerHeight in JS — trust the real values from --window-size
+// ─── Viewport Config ───
 var VIEWPORT_WIDTH = 1280;
 var VIEWPORT_HEIGHT = 720;
 
@@ -74,25 +79,7 @@ var shieldScript = generateShieldScript();
 var stealthScript = generateStealthScript();
 var interceptorScript = generateInterceptorScript();
 
-// ─── v5.1: Earliest-possible webdriver removal via CDP ───
-// Page.addScriptToEvaluateOnNewDocument runs BEFORE addInitScript
-// This is the ONLY way to ensure webdriver=undefined before BrowserScan checks
-var CDP_WEBDRIVER_SCRIPT = `
-  (function() {
-    try {
-      if ('webdriver' in navigator) {
-        delete Object.getPrototypeOf(navigator).webdriver;
-      }
-      Object.defineProperty(navigator, 'webdriver', {
-        get: function() { return undefined; },
-        enumerable: true,
-        configurable: true
-      });
-    } catch(e) {}
-  })();
-`;
-
-// ─── Temp Profile Management (C-IDX-02) ───
+// ─── Temp Profile Management ───
 function createTempProfile() {
   var dir = path.join(os.tmpdir(), 'sentinel-profile-' + crypto.randomBytes(8).toString('hex'));
   fs.mkdirSync(dir, { recursive: true });
@@ -107,7 +94,7 @@ function cleanupProfile(dir) {
   } catch (e) {}
 }
 
-// ─── evalWithTimeout (C-IDX-10, C-IDX-19) ───
+// ─── evalWithTimeout ───
 async function evalWithTimeout(frame, expression, timeoutMs) {
   return Promise.race([
     frame.evaluate(expression).catch(function() { return null; }),
@@ -119,14 +106,13 @@ async function injectToFrame(frame, script) {
   try { await frame.evaluate(script); } catch (e) {}
 }
 
-// ─── v5.1 Human-Like Behavior ───
+// ─── Human-Like Behavior ───
 function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min)) + min;
 }
 
 async function humanBehavior(page) {
   try {
-    // Random mouse movements (3-5 movements)
     var moveCount = randomDelay(3, 6);
     for (var i = 0; i < moveCount; i++) {
       var x = randomDelay(100, VIEWPORT_WIDTH - 100);
@@ -139,10 +125,8 @@ async function humanBehavior(page) {
 
 async function humanScroll(page, waitMs) {
   try {
-    // Initial mouse movement
     await humanBehavior(page);
 
-    // Smooth scrolling with variable speed
     await page.evaluate(function() {
       return new Promise(function(resolve) {
         var totalDistance = 0;
@@ -166,17 +150,15 @@ async function humanScroll(page, waitMs) {
       });
     });
 
-    // Post-scroll mouse movement
     await humanBehavior(page);
   } catch (e) {}
 
-  // Human-like wait (not exact — randomized)
   var actualWait = Math.min(waitMs, 30000) + randomDelay(-2000, 3000);
   if (actualWait < 5000) actualWait = 5000;
   await page.waitForTimeout(actualWait);
 }
 
-// ─── Network Capture (C-IDX-09) ───
+// ─── Network Capture (Playwright-level, supplementary to CDP) ───
 function setupNetworkCapture(page) {
   var networkLog = [];
   page.on('request', function(request) {
@@ -225,19 +207,24 @@ function setupNetworkCapture(page) {
 }
 
 // ════════════════════════════════════════════════════
-//  MAIN SCAN FUNCTION — 10-Layer Pipeline
+//  MAIN SCAN FUNCTION
 // ════════════════════════════════════════════════════
 async function runScan(mode, targetUrl) {
   var profileDir = createTempProfile();
   var pushEvents = [];
   var networkLog = [];
   var context, page, cdp, targetGraph;
+  var pipeline = new EventPipeline({ maxEvents: 100000 });
+
+  // v6.0.0: Real-time alert logging
+  if (VERBOSE) {
+    pipeline.on('alert', function(event) {
+      process.stderr.write('[ALERT] ' + event.cat + ':' + event.api + ' risk=' + event.risk + '\n');
+    });
+  }
 
   try {
-    // ═══ L1: PERSISTENT BROWSER LAUNCH (C-IDX-01, C-IDX-02) ═══
-    // v5.1: plain playwright, persistent context provides REAL chrome objects
-    // --window-size ensures outerWidth/Height are realistic
-    // NO viewport option here — set explicitly AFTER launch to avoid conflict
+    // ═══ L1: PERSISTENT BROWSER LAUNCH (PATCHRIGHT) ═══
     var launchOptions = {
       headless: HEADLESS,
       args: [
@@ -259,27 +246,20 @@ async function runScan(mode, targetUrl) {
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
     page = context.pages()[0] || await context.newPage();
 
-    if (VERBOSE) process.stderr.write('[Sentinel] L1: Browser launched (persistent context + real chrome)\n');
+    if (VERBOSE) process.stderr.write('[Sentinel] L1: Browser launched (Patchright persistent context)\n');
 
-    // ═══ L1.5: CDP WEBDRIVER FIX — EARLIEST POSSIBLE MOMENT ═══
-    // v5.1 NEW: Page.addScriptToEvaluateOnNewDocument runs BEFORE addInitScript
-    // This ensures navigator.webdriver=undefined before BrowserScan's detection script
-    var cdpEarly = await context.newCDPSession(page);
-    await cdpEarly.send('Page.addScriptToEvaluateOnNewDocument', {
-      source: CDP_WEBDRIVER_SCRIPT
-    });
+    // ═══ L1.5: REMOVED in v6.0.0 ═══
+    // Patchright handles navigator.webdriver internally at CDP level.
+    // No need for Page.addScriptToEvaluateOnNewDocument workaround.
 
-    if (VERBOSE) process.stderr.write('[Sentinel] L1.5: CDP webdriver fix injected (earliest moment)\n');
-
-    // ═══ L2: addInitScript INJECTION (C-IDX-03) ═══
-    // Order: Shield → Stealth → Interceptor (PROVEN since v3)
+    // ═══ L2: addInitScript INJECTION ═══
     await page.addInitScript({ content: shieldScript });
     await page.addInitScript({ content: stealthScript });
     await page.addInitScript({ content: interceptorScript });
 
     if (VERBOSE) process.stderr.write('[Sentinel] L2: Scripts injected (Shield → Stealth → Interceptor)\n');
 
-    // ═══ L3: CDP SESSION SETUP (C-IDX-04, C-IDX-05) ═══
+    // ═══ L3: CDP SESSION + PUSH TELEMETRY + CDP COLLECTORS ═══
     cdp = await context.newCDPSession(page);
     await cdp.send('Runtime.addBinding', { name: 'SENTINEL_PUSH' });
     cdp.on('Runtime.bindingCalled', function(params) {
@@ -298,13 +278,22 @@ async function runScan(mode, targetUrl) {
 
     if (VERBOSE) process.stderr.write('[Sentinel] L3: CDP session + push telemetry enabled\n');
 
-    // ═══ L4-L5: TARGET GRAPH + WORKER PIPELINE (C-IDX-06) ═══
+    // ═══ L3.5: CDP COLLECTORS (v6.0.0 NEW) ═══
+    var networkCollector = new CDPNetworkCollector(cdp, pipeline, { verbose: VERBOSE });
+    await networkCollector.initialize();
+
+    var securityCollector = new CDPSecurityCollector(cdp, pipeline, { verbose: VERBOSE });
+    await securityCollector.initialize();
+
+    if (VERBOSE) process.stderr.write('[Sentinel] L3.5: CDP collectors initialized (Network + Security)\n');
+
+    // ═══ L4-L5: TARGET GRAPH + WORKER PIPELINE ═══
     targetGraph = new TargetGraph(cdp, interceptorScript, shieldScript, stealthScript, { verbose: VERBOSE });
     await targetGraph.initialize();
 
     if (VERBOSE) process.stderr.write('[Sentinel] L4-L5: TargetGraph + Worker Pipeline initialized\n');
 
-    // ═══ L6: FRAME LIFECYCLE HANDLERS (C-IDX-07, C-IDX-08) ═══
+    // ═══ L6: FRAME LIFECYCLE HANDLERS ═══
     page.on('frameattached', async function(frame) {
       try { await injectToFrame(frame, shieldScript + stealthScript + interceptorScript); } catch(e) {}
     });
@@ -316,28 +305,28 @@ async function runScan(mode, targetUrl) {
 
     if (VERBOSE) process.stderr.write('[Sentinel] L6: Frame lifecycle handlers registered\n');
 
-    // ═══ L8: BIDIRECTIONAL NETWORK CAPTURE (C-IDX-09) ═══
+    // ═══ L8: DUAL-LAYER NETWORK CAPTURE ═══
+    // CDP collector (L3.5) is primary — captures initiator chains, timing, TLS
+    // Playwright-level capture is supplementary — for body content access
     networkLog = setupNetworkCapture(page);
 
-    if (VERBOSE) process.stderr.write('[Sentinel] L8: Bidirectional network capture enabled\n');
+    if (VERBOSE) process.stderr.write('[Sentinel] L8: Dual-layer network capture enabled\n');
 
     // ═══ L7: NAVIGATE & OBSERVE ═══
     process.stderr.write('[Sentinel] Navigating to ' + targetUrl + '...\n');
 
-    // v5.1: Human-like pre-navigation delay
     await page.waitForTimeout(randomDelay(800, 2000));
 
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
 
-    // v5.1: Wait for page to settle, then human-like interaction
     await page.waitForTimeout(randomDelay(2000, 4000));
 
     if (VERBOSE) process.stderr.write('[Sentinel] L7: Page loaded, starting human-like observation\n');
 
     await humanScroll(page, SCAN_WAIT);
 
-    // ═══ L9: PARALLEL COLLECTION (C-IDX-10, C-IDX-11) ═══
-    // Final flush (C-IDX-21)
+    // ═══ L9: PARALLEL COLLECTION ═══
+    // Final flush
     try {
       await page.evaluate(function() {
         if (typeof window.__SENTINEL_FLUSH__ === 'function') window.__SENTINEL_FLUSH__();
@@ -386,7 +375,7 @@ async function runScan(mode, targetUrl) {
     var workerEvts = targetGraph.getWorkerEvents();
     for (var wei = 0; wei < workerEvts.length; wei++) { allEvents.push(workerEvts[wei]); }
 
-    // Dedup
+    // Dedup in-page events
     var seen = {};
     var deduped = [];
     for (var di = 0; di < allEvents.length; di++) {
@@ -395,33 +384,39 @@ async function runScan(mode, targetUrl) {
     }
     allEvents = deduped;
 
+    // v6.0.0: Push in-page events into pipeline too
+    pipeline.pushBatch(allEvents);
+
     var frameInfo = allFrames.map(function(f) {
       try { return { url: f.url(), name: f.name() }; } catch(e) { return { url: 'destroyed', name: '' }; }
     });
 
-    // ═══ L10: UNIFIED REPORT GENERATION (C-IDX-12) ═══
+    // ═══ L10: UNIFIED REPORT GENERATION ═══
     var injectionFlags = {
-      layer1_addInitScript: true,
+      layer1_patchright: true,
       layer2_shield: !!(mainData && mainData.injectionFlags && mainData.injectionFlags.shield),
       layer3_stealth: !!(mainData && mainData.injectionFlags && mainData.injectionFlags.stealth),
       layer4_interceptor: !!(mainData && mainData.injectionFlags && mainData.injectionFlags.interceptor),
       layer5_recursiveAutoAttach: true,
       layer6_workerPipeline: workerEvts.length > 0 || true,
       layer7_frameLifecycle: true,
-      layer8_networkCapture: networkLog.length > 0,
-      layer9_cdpWebdriverFix: true,
-      layer10_cdpLeakPatch: true,
+      layer8_dualNetworkCapture: networkLog.length > 0,
+      layer9_cdpNetworkCollector: true,
+      layer10_cdpSecurityCollector: true,
       subFramesChecked: subFrameCount,
       subFramesCollected: subFramesCollected,
       pushEventsReceived: pushEvents.length,
       workerEventsReceived: workerEvts.length,
+      cdpPipelineEvents: pipeline.getAll().length,
       totalDeduped: allEvents.length
     };
 
     var tgInventory = targetGraph.getInventory();
+    var pipelineStats = pipeline.getStats();
 
-    process.stderr.write('[Sentinel] Scan complete: ' + allEvents.length + ' events, ' +
-      Object.keys(allEvents.reduce(function(a, e) { a[e.cat] = 1; return a; }, {})).length + '/42 categories, ' +
+    process.stderr.write('[Sentinel] Scan complete: ' + allEvents.length + ' in-page events, ' +
+      pipelineStats.total + ' total pipeline events, ' +
+      Object.keys(pipelineStats.categories).length + ' categories, ' +
       subFrameCount + ' sub-frames checked, ' + workerEvts.length + ' worker events, ' +
       networkLog.length + ' network entries\n');
 
@@ -446,16 +441,17 @@ async function runScan(mode, targetUrl) {
 }
 
 // ════════════════════════════════════════════════════
-//  ENTRY POINT (C-IDX-13, C-IDX-14)
+//  ENTRY POINT
 // ════════════════════════════════════════════════════
 async function main() {
-  process.stderr.write('\n🛡️  SENTINEL v5.1.0 — Unified Forensic Engine (Invisible Edition)\n');
+  process.stderr.write('\n🛡️  SENTINEL v6.0.0 — Dual-Layer Forensic Engine (Patchright + CDP Collectors)\n');
   process.stderr.write('   Zero Spoofing | Zero Blind Spot | Zero Regression | INVISIBLE\n');
   process.stderr.write('   Target: ' + TARGET_URL + '\n');
   process.stderr.write('   Mode: ' + (DUAL_MODE ? 'DUAL (observe → stealth)' : OBSERVE_MODE ? 'OBSERVE' : 'STEALTH') + '\n');
   process.stderr.write('   Headless: ' + HEADLESS + '\n');
-  process.stderr.write('   Anti-Bot: CDP webdriver fix + console.debug leak patch\n');
-  process.stderr.write('   Stealth: persistent context native chrome (no playwright-extra)\n\n');
+  process.stderr.write('   Anti-Bot: Patchright (eliminates Runtime.enable + Console.enable + automation leaks)\n');
+  process.stderr.write('   Stealth: persistent context + Patchright native chrome\n');
+  process.stderr.write('   CDP: Network + Security collectors active\n\n');
 
   if (DUAL_MODE) {
     process.stderr.write('══════ OBSERVE MODE ══════\n');
