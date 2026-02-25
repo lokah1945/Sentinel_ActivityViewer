@@ -1,7 +1,7 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "5.1.0",
-  "description": "SENTINEL v5.1.0 — Unified Forensic Engine (Invisible Edition)",
+  "version": "6.0.0",
+  "description": "SENTINEL v6.0.0 — Dual-Layer Forensic Engine (Patchright + CDP Collectors)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -11,7 +11,7 @@
     "test:full": "node tests/test-regression.js && node tests/test-stress.js"
   },
   "dependencies": {
-    "playwright": "^1.50.0"
+    "patchright": "^1.49.1"
   },
   "author": "Sentinel Forensic Lab",
   "license": "MIT"

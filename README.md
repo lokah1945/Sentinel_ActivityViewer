@@ -1,116 +1,103 @@
-# 🛡️ Sentinel v3.0 — Maling Catcher
+# 🛡️ SENTINEL v6.0.0 — Dual-Layer Forensic Engine
 
-**Browser Activity Viewer with Stealth Mode** — Detects and reports all fingerprinting, tracking, and suspicious browser API activity from any website.
+**Patchright + CDP Collectors | Zero Spoofing | Zero Blind Spot | Zero Regression | INVISIBLE**
 
-## 🚀 Quick Start
+## Architecture
+
+```
+L1:  Persistent Browser Launch (Patchright — eliminates CDP leaks)
+L2:  addInitScript injection (Shield → Stealth → Interceptor)
+L3:  CDP Session + Push Telemetry + CDP Collectors (Network + Security)
+L4:  TargetGraph (Recursive Auto-Attach)
+L5:  Worker Pipeline
+L6:  Frame Lifecycle Handlers (frameattached + framenavigated)
+L7:  Navigate & Observe (human-like behavior)
+L8:  Dual-Layer Network Capture (CDP primary + Playwright supplementary)
+L9:  Parallel Collection (main + sub-frames + workers + CDP events)
+L10: Unified Report Generation (JSON + HTML dark theme + CTX)
+```
+
+## What's New in v6.0.0
+
+| Feature | v5.x | v6.0.0 |
+|---------|------|--------|
+| Browser Driver | Playwright (leaks Runtime.enable) | Patchright (zero CDP leaks) |
+| Network Monitoring | Playwright request/response only | CDP Network.* + Playwright (dual-layer) |
+| WebSocket Capture | In-page hook only | CDP frames (sent + received + created + closed) |
+| TLS/Security | Not monitored | CDP Security.* (cert state, errors, protocol) |
+| Cookie Tracking | In-page cookie hook only | CDP extra info (blocked cookies, SameSite, etc.) |
+| Event Backbone | Batch collection | EventPipeline (real-time streaming + dedup) |
+| Regression Rules | 25 rules | 32 rules (7 new for v6 architecture) |
+
+## Quick Start
 
 ```bash
-# Install dependencies
 npm install
-
-# Interactive mode (akan minta input URL)
-npm start
-
-# Quick scan dengan stealth (default)
-node index.js browserscan.net
-
-# Observe mode (tanpa stealth, deteksi mentah)
-node index.js browserscan.net --observe
-
-# Dual mode (jalankan kedua mode & bandingkan hasilnya)
-node index.js browserscan.net --dual-mode
-
-# Custom timeout (default 30s)
-node index.js browserscan.net --timeout=45000
-
-# Headless mode
-node index.js browserscan.net --headless
+node index.js https://example.com
 ```
 
-## 🏗️ Architecture
+## CLI Options
 
 ```
-sentinel_v3/
-├── index.js                    # CLI entry point
+node index.js <URL> [options]
+
+Options:
+  --no-headless     Show browser window
+  --dual-mode       Run observe → stealth (double scan)
+  --observe         Observe mode (no stealth)
+  --verbose         Detailed logging
+  --timeout=60000   Navigation timeout (ms)
+  --wait=30000      Scan wait time (ms)
+  --output=./output Output directory
+  --locale=en-US    Browser locale
+  --timezone=...    Browser timezone
+```
+
+## Testing
+
+```bash
+npm test           # 32-rule regression gate
+npm run test:stress  # 1000-iteration stress test
+npm run test:full    # Both tests
+node tests/test-injection.js https://browserscan.net  # Live injection diagnostic
+```
+
+## File Structure
+
+```
+sentinel-v6.0.0/
+├── index.js                          # Main orchestrator (472 lines)
 ├── package.json
 ├── hooks/
-│   ├── stealth-config.js       # Stealth plugin + extra hardening
-│   └── api-interceptor.js      # 18-category API hook engine
+│   ├── anti-detection-shield.js      # Shield + Quiet Mode (195 lines)
+│   ├── stealth-config.js             # Minimal stealth (73 lines)
+│   └── api-interceptor.js            # 42 categories, 110+ hooks (906 lines)
+├── collectors/
+│   ├── cdp-network-collector.js      # CDP Network.* collector (335 lines)
+│   └── cdp-security-collector.js     # CDP Security.* collector (71 lines)
+├── lib/
+│   ├── target-graph.js               # Recursive auto-attach (265 lines)
+│   ├── correlation-engine.js         # Burst/entropy analysis (156 lines)
+│   ├── signature-db.js               # Library fingerprints (130 lines)
+│   └── event-pipeline.js             # Real-time event streaming (79 lines)
 ├── reporters/
-│   └── report-generator.js     # JSON + HTML + Context Map generator
-├── output/                     # Scan results saved here
-└── README.md
+│   └── report-generator.js           # JSON + HTML + CTX reports (331 lines)
+└── tests/
+    ├── test-regression.js            # 32-rule regression gate (241 lines)
+    ├── test-stress.js                # 1000-iteration stress test (140 lines)
+    └── test-injection.js             # Live injection diagnostic (112 lines)
 ```
 
-## 🔍 18 Monitored Categories
+## 42 Monitored Categories
 
-| Category | APIs Hooked | Risk |
-|----------|-------------|------|
-| Canvas | toDataURL, toBlob, getImageData, fillText, isPointInPath | 🔴 HIGH |
-| WebGL | getParameter, getExtension, getSupportedExtensions, getShaderPrecisionFormat, readPixels | 🔴 HIGH |
-| Audio | OfflineAudioContext, createOscillator, createDynamicsCompressor, createAnalyser, baseLatency | 🔴 CRITICAL |
-| Font Detection | measureText, document.fonts.check, getBoundingClientRect, offsetWidth | 🔴 HIGH |
-| Fingerprint | userAgent, platform, languages, hardwareConcurrency, deviceMemory, plugins, matchMedia | 🔴 HIGH |
-| Math Fingerprint | acos, acosh, asin, sinh, cos, tan, exp, expm1, log1p (15 functions) | 🟡 HIGH |
-| Permissions | navigator.permissions.query | 🔴 HIGH |
-| Storage | cookie get/set, localStorage, sessionStorage, indexedDB | 🟡 MEDIUM |
-| Screen | width, height, colorDepth, pixelDepth, availWidth, devicePixelRatio | 🟡 MEDIUM |
-| Network | fetch, XMLHttpRequest, sendBeacon | 🟡 MEDIUM |
-| WebRTC | RTCPeerConnection | 🔴 CRITICAL |
-| Performance | getEntries, getEntriesByType, performance.now | 🟡 MEDIUM |
-| Media Devices | enumerateDevices | 🔴 CRITICAL |
-| DOM Probe | createElement (canvas/iframe/audio/video) | 🟡 MEDIUM |
-| Clipboard | readText, writeText | 🔴 CRITICAL |
-| Geolocation | getCurrentPosition, watchPosition | 🔴 CRITICAL |
-| Service Worker | register | 🔴 HIGH |
-| Hardware | getBattery, timezone, architecture | 🟡 MEDIUM |
+canvas, webgl, audio, font-detection, fingerprint, screen, storage, network,
+perf-timing, media-devices, dom-probe, clipboard, geolocation, service-worker,
+hardware, exfiltration, webrtc, math-fingerprint, permissions, speech,
+client-hints, intl-fingerprint, css-fingerprint, property-enum, offscreen-canvas,
+honeypot, credential, system, encoding, worker, webassembly, keyboard-layout,
+sensor-apis, visualization, battery, event-monitoring, blob-url,
+shared-array-buffer, postmessage-exfil, performance-now, device-info, cross-frame-comm
 
-## 🥷 Stealth Mode
+## CDP Collector Categories (New in v6)
 
-Stealth mode uses **17 evasion techniques** from `puppeteer-extra-plugin-stealth`:
-
-- `chrome.app` / `chrome.csi` / `chrome.loadTimes` / `chrome.runtime`
-- `navigator.webdriver` / `navigator.plugins` / `navigator.vendor` / `navigator.permissions` / `navigator.languages` / `navigator.hardwareConcurrency`
-- `user-agent-override` / `media.codecs`
-- `iframe.contentWindow` / `window.outerdimensions`
-- `webgl.vendor` / `sourceurl` / `defaultArgs`
-
-**Plus Extra Stealth Layer:**
-- Deep webdriver property cleanup
-- Permissions API spoofing
-- Chrome runtime emulation
-- Connection API spoofing
-- Stack trace cleanup (removes playwright/puppeteer traces)
-- Notification permission normalization
-
-## 🔄 Dual Mode
-
-Run `--dual-mode` to execute both STEALTH and OBSERVE scans, then compare:
-
-```
-  📊 DUAL MODE COMPARISON
-  Metric                    STEALTH         OBSERVE
-  ───────────────────────────────────────────────
-  Risk Score                62              48
-  Total Events              1247            869
-  Categories                14              9
-```
-
-This reveals whether the target website **behaves differently** when it detects automation.
-
-## 📊 Output
-
-Each scan generates 3 files in `./output/`:
-- `*_report.json` — Structured metrics, threats, risk score
-- `*_report.html` — Visual dashboard with threat assessment
-- `*_context-map.json` — Frame/origin hierarchy
-
-## ⚠️ FingerprintJS v5 Detection
-
-Sentinel v3 automatically detects the **FingerprintJS v5 signature** pattern:
-- Canvas `isPointInPath` + audio fingerprinting + font detection + math fingerprinting
-- Triggers a CRITICAL threat alert when detected
-
-## License
-
-MIT
+cdp-network, cdp-cookie, cdp-websocket, cdp-eventsource, cdp-security
