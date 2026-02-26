@@ -1,0 +1,192 @@
+{
+  "_id": "fp_chrome_00171",
+  "browserName": "Chrome",
+  "browserType": "chrome",
+  "engine": "chromium",
+  "webgl": {
+    "vendor": "Google Inc. (Intel)",
+    "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 730 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "extensions": [
+      "ANGLE_instanced_arrays",
+      "EXT_blend_minmax",
+      "EXT_color_buffer_half_float",
+      "EXT_disjoint_timer_query",
+      "EXT_frag_depth",
+      "EXT_shader_texture_lod",
+      "EXT_texture_filter_anisotropic",
+      "WEBKIT_EXT_texture_filter_anisotropic",
+      "EXT_sRGB",
+      "KHR_parallel_shader_compile",
+      "OES_element_index_uint",
+      "OES_standard_derivatives",
+      "OES_texture_float",
+      "OES_texture_float_linear",
+      "OES_texture_half_float",
+      "OES_texture_half_float_linear",
+      "OES_vertex_array_object",
+      "WEBGL_color_buffer_float",
+      "WEBGL_compressed_texture_s3tc",
+      "WEBKIT_WEBGL_compressed_texture_s3tc",
+      "WEBGL_debug_renderer_info",
+      "WEBGL_debug_shaders",
+      "WEBGL_depth_texture",
+      "WEBKIT_WEBGL_depth_texture",
+      "WEBGL_draw_buffers",
+      "WEBGL_lose_context",
+      "WEBKIT_WEBGL_lose_context"
+    ],
+    "parameters": {
+      "max_texture_size": 8192,
+      "max_viewport_dims": [
+        8192,
+        8192
+      ],
+      "max_renderbuffer_size": 8192,
+      "max_combined_texture_image_units": 32,
+      "max_cube_map_texture_size": 8192,
+      "max_fragment_uniform_vectors": 1024,
+      "max_varying_vectors": 30,
+      "max_vertex_attribs": 16,
+      "max_vertex_texture_image_units": 16,
+      "max_vertex_uniform_vectors": 4096,
+      "aliased_line_width_range": [
+        1,
+        1
+      ],
+      "aliased_point_size_range": [
+        1,
+        1024
+      ]
+    }
+  },
+  "vendorWebGL": "Google Inc. (Intel)",
+  "rendererWebGL": "ANGLE (Intel, Intel(R) UHD Graphics 730 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "canvas": {
+    "capabilities": {
+      "winding": true,
+      "geometry": {
+        "isPointInPath": true,
+        "isPointInStroke": false
+      }
+    }
+  },
+  "audio": {
+    "capabilities": {
+      "sample_rate": 48000,
+      "channel_count": 2,
+      "state": "suspended"
+    }
+  },
+  "hardware": {
+    "cores": 8,
+    "memory": 8,
+    "gpu": "Intel Intel(R) UHD Graphics 730"
+  },
+  "navigator": {
+    "hardwareConcurrency": 8,
+    "deviceMemory": 8,
+    "platform": "Win32"
+  },
+  "hardwareConcurrency": 8,
+  "deviceMemory": 8,
+  "userAgent": null,
+  "viewport": {
+    "width": 1600,
+    "height": 856
+  },
+  "screen": {
+    "width": 1600,
+    "height": 856,
+    "colorDepth": 24,
+    "pixelDepth": 24
+  },
+  "deviceScaleFactor": 1,
+  "hasTouch": false,
+  "isMobile": false,
+  "locale": "en-US",
+  "timezone": "America/New_York",
+  "fingerprintSeed": "fp_chrome_00171_1771342384195",
+  "font_profile": {
+    "persona": "CLEAN",
+    "packs": [
+      "base"
+    ],
+    "os": "windows",
+    "description": "Fresh Windows install, no extra software"
+  },
+  "_meta": {
+    "hardware_id": "hw_win_00171",
+    "os": {
+      "name": "windows",
+      "version": "10.0.19045"
+    },
+    "tier": 0,
+    "rarity": 0.016,
+    "usage_count": 0,
+    "last_used": null,
+    "ua_mode": "native"
+  },
+  "fonts": {
+    "persona": "CLEAN",
+    "list": [
+      "Arial",
+      "Arial Black",
+      "Arial Narrow",
+      "Calibri",
+      "Cambria",
+      "Cambria Math",
+      "Candara",
+      "Comic Sans MS",
+      "Consolas",
+      "Constantia",
+      "Corbel",
+      "Courier New",
+      "Ebrima",
+      "Franklin Gothic Medium",
+      "Gabriola",
+      "Gadugi",
+      "Georgia",
+      "Impact",
+      "Lucida Console",
+      "Lucida Sans Unicode",
+      "MS Gothic",
+      "MS PGothic",
+      "MV Boli",
+      "Microsoft Sans Serif",
+      "Myanmar Text",
+      "Nirmala UI",
+      "Palatino Linotype",
+      "Segoe Print",
+      "Segoe Script",
+      "Segoe UI",
+      "Segoe UI Black",
+      "Segoe UI Emoji",
+      "Segoe UI Historic",
+      "Segoe UI Light",
+      "Segoe UI Semibold",
+      "Segoe UI Semilight",
+      "Segoe UI Symbol",
+      "Sitka",
+      "Sylfaen",
+      "Symbol",
+      "Tahoma",
+      "Times New Roman",
+      "Trebuchet MS",
+      "Verdana",
+      "Webdings",
+      "Wingdings",
+      "Yu Gothic"
+    ],
+    "os": "windows",
+    "description": "Fresh Windows install, no extra software"
+  },
+  "geolocation": {
+    "latitude": 39.018,
+    "longitude": -77.539,
+    "accuracy": 100
+  },
+  "languages": [
+    "en-US",
+    "en"
+  ]
+}
