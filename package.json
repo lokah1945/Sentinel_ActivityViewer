@@ -1,19 +1,21 @@
 {
   "name": "sentinel-activity-viewer",
-  "version": "7.0.0",
-  "description": "SENTINEL v7.0.0 \u2014 Hybrid Dual-Telemetry Forensic Engine",
+  "version": "7.1.0",
+  "description": "SENTINEL v7.1.0 \u2014 Hybrid Dual-Telemetry Forensic Engine. Hook Layer + CDP Observer + rebrowser-patches + Stealth Plugin.",
   "main": "index.js",
   "bin": {
     "sentinel": "./index.js"
   },
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx rebrowser-playwright install chromium",
+    "postinstall": "node scripts/install-browsers.js",
     "test": "node tests/test-regression.js",
     "test:injection": "node tests/test-injection.js",
     "test:full": "node tests/test-regression.js && node tests/test-injection.js"
   },
   "dependencies": {
+    "playwright": "^1.52.0",
+    "playwright-core": "^1.52.0",
     "rebrowser-playwright": "^1.52.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"

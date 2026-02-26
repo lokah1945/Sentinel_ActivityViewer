@@ -1,46 +1,21 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  SENTINEL v7.0.0 — HYBRID DUAL-TELEMETRY FORENSIC ENGINE
+//  SENTINEL v7.1.0 — HYBRID DUAL-TELEMETRY FORENSIC ENGINE
 //  Main Orchestrator: 12-Layer Pipeline
 // ═══════════════════════════════════════════════════════════════
-// CHANGE LOG v7.0.0-fix1 (2026-02-26):
-//   - FIX: Added --dual-mode support (observe → stealth sequential)
-//   - FIX: Added --no-headless flag for visible browser
-//   - FIX: Added --timeout= and --wait= as separate CLI params
-//   - FIX: Added --persist= for user-specified profile directory
-//   - FIX: Added --no-stealth for comparison mode (observe only CDP)
-//   - FIX: SIGINT/SIGTERM graceful cleanup handlers
-//   - FIX: observe mode disables stealth plugin (pure CDP only)
-//   - FIX: Headless mode logic matches v6.4 behavior exactly
-//
-// CHANGE LOG v7.0.0 (2026-02-26):
-//   - PURE NEW CONCEPT: Hybrid engine combining:
-//     * v6.4 basis: persistentContext, rebrowser-patches, CDP observer,
-//       auto-cleanup, stealth plugin
-//     * v6.1/v5.0 restored: hook layer (42 categories), push telemetry,
-//       frame lifecycle handlers, bidirectional network capture
-//   - L1:  Persistent Browser Launch (from v6.4 — REG-022)
-//   - L2:  Stealth Plugin + rebrowser patches (from v6.4 — REG-028)
-//   - L3:  addInitScript Injection — Shield + Interceptor (RESTORED — REG-001)
-//   - L4:  CDP Session Setup + Runtime.addBinding (from v6.1)
-//   - L5:  Push Telemetry receiver (500ms — REG-015)
-//   - L6:  Recursive Auto-Attach — TargetGraph (from v6.4 — REG-016)
-//   - L7:  Worker Pipeline — Network.enable per worker (from v6.4)
-//   - L8:  Frame Lifecycle Handlers (RESTORED — REG-006, REG-007)
-//   - L9:  CDP Domain Collectors (from v6.4 — REG-026)
-//   - L10: Bidirectional Network Capture (RESTORED)
-//   - L11: Parallel Collection + Dedup + Merge (REG-018)
-//   - L12: Unified Report Generation — JSON/HTML/CTX
-//   - REG-021: Final flush before browser close
-//   - REG-027: persistentContext auto-cleanup (CLEANUP_PROFILE)
-//   - NO BACKWARD COMPATIBILITY — pure v7.0.0 architecture
+// CHANGE LOG v7.1.0 (2026-02-26):
+//   - FIX: Browser auto-install fallback when chromium not found
+//   - FIX: package.json requires playwright + playwright-core as
+//     peer deps for rebrowser-playwright (prevents esmLoader error)
+//   - FIX: postinstall installs chromium for BOTH rebrowser-playwright
+//     AND playwright to cover version mismatch in registry paths
+//   - FIX: Graceful retry on launch failure with auto chromium install
+//   - All v7.0.0-fix1 features preserved (--dual-mode, --no-headless, etc.)
 //
 // LAST HISTORY LOG:
-//   v6.4.0: CDP-only observer, persistentContext, auto-cleanup, --dual-mode
-//   v6.1.0: Hook layer + CDP collectors, standard launch
-//   v5.0.0: Unified engine with 42 categories
-//   v7.0.0: Hybrid dual-telemetry (hook + CDP) with persistent context
-//   v7.0.0-fix1: Restored --dual-mode, --no-headless, full CLI from v6.4
+//   v7.0.0-fix1: CLI restored (--dual-mode, --no-headless)
+//   v7.0.0:      Hybrid dual-telemetry engine (hook + CDP)
+//   v6.4.0:      CDP-only, persistentContext, auto-cleanup, --dual-mode
 // ═══════════════════════════════════════════════════════════════
 
 'use strict';
@@ -51,6 +26,7 @@ process.env.REBROWSER_PATCHES_SOURCE_URL = process.env.REBROWSER_PATCHES_SOURCE_
 var fs = require('fs');
 var path = require('path');
 var os = require('os');
+var { execSync } = require('child_process');
 var { addExtra } = require('playwright-extra');
 var playwrightCore = require('rebrowser-playwright');
 var StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -62,8 +38,41 @@ var { TargetGraph } = require('./lib/target-graph');
 var { CorrelationEngine } = require('./lib/correlation-engine');
 var { ReportGenerator } = require('./reporters/report-generator');
 
-var VERSION = 'sentinel-v7.0.0';
+var VERSION = 'sentinel-v7.1.0';
 var CLEANUP_PROFILE = true;
+
+// ═══════════════════════════════════════════
+//  BROWSER AUTO-INSTALL HELPER (v7.1.0 NEW)
+// ═══════════════════════════════════════════
+function autoInstallChromium() {
+  console.log('\n[AUTO-INSTALL] Chromium not found. Attempting auto-install...');
+
+  var commands = [
+    { cmd: 'npx rebrowser-playwright install chromium', label: 'rebrowser-playwright' },
+    { cmd: 'npx playwright install chromium', label: 'playwright' }
+  ];
+
+  var success = false;
+  for (var i = 0; i < commands.length; i++) {
+    try {
+      console.log('[AUTO-INSTALL] Trying: ' + commands[i].label + '...');
+      execSync(commands[i].cmd, { stdio: 'inherit', timeout: 300000 });
+      console.log('[AUTO-INSTALL] \u2713 ' + commands[i].label + ' install succeeded');
+      success = true;
+    } catch (e) {
+      console.warn('[AUTO-INSTALL] \u26A0 ' + commands[i].label + ' failed');
+    }
+  }
+
+  if (!success) {
+    console.error('\n[AUTO-INSTALL] \u274C All install methods failed!');
+    console.error('[AUTO-INSTALL] Please install manually:');
+    console.error('  npx playwright install chromium');
+    console.error('  npx rebrowser-playwright install chromium\n');
+  }
+
+  return success;
+}
 
 // ═══════════════════════════════════════════
 //  TEMP PROFILE CLEANUP REGISTRY
@@ -84,7 +93,6 @@ function cleanupTempDirs() {
   });
 }
 
-// Graceful shutdown on SIGINT/SIGTERM
 process.on('SIGINT', function() {
   console.log('\n[Sentinel] Received SIGINT, cleaning up...');
   cleanupTempDirs();
@@ -125,14 +133,96 @@ if (!target) {
   console.log('  --no-stealth       Disable stealth plugin (for comparison)');
   console.log('  --timeout=<ms>     Navigation timeout (default: 60000)');
   console.log('  --wait=<ms>        Post-load wait time (default: 30000)');
-  console.log('  --persist=<dir>    Persistent browser profile directory (optional)');
-  console.log('                     If not specified, auto-generates temp profile and cleans up after scan\n');
+  console.log('  --persist=<dir>    Persistent browser profile directory\n');
   console.log('Examples:');
   console.log('  node index.js https://browserscan.net --dual-mode --no-headless');
   console.log('  node index.js https://example.com --persist=./profiles/session1 --no-headless');
-  console.log('  node index.js https://example.com --no-headless');
   console.log('  node index.js https://browserscan.net --dual-mode --no-headless --timeout=60000 --wait=30000\n');
   process.exit(0);
+}
+
+// ═══════════════════════════════════════════
+//  BROWSER LAUNCH WITH AUTO-INSTALL RETRY
+// ═══════════════════════════════════════════
+async function launchBrowserWithRetry(chromium, persistDir, launchOpts) {
+  // Attempt 1: normal launch
+  try {
+    return await chromium.launchPersistentContext(persistDir, launchOpts);
+  } catch (err) {
+    var msg = err.message || '';
+
+    // Check if it's a "browser not found" error
+    if (msg.indexOf("Executable doesn't exist") !== -1 ||
+        msg.indexOf('browserType.launch') !== -1 ||
+        msg.indexOf('download new browsers') !== -1) {
+
+      console.warn('[Sentinel] Browser not found, attempting auto-install...');
+
+      // Auto-install chromium
+      var installed = autoInstallChromium();
+
+      if (installed) {
+        // Attempt 2: retry after install
+        console.log('[Sentinel] Retrying browser launch...');
+        try {
+          return await chromium.launchPersistentContext(persistDir, launchOpts);
+        } catch (retryErr) {
+          // If still fails, try with executablePath pointing to system Chrome
+          console.warn('[Sentinel] Retry failed. Trying system Chrome/Chromium...');
+
+          var systemChrome = findSystemChrome();
+          if (systemChrome) {
+            console.log('[Sentinel] Found system browser: ' + systemChrome);
+            launchOpts.executablePath = systemChrome;
+            return await chromium.launchPersistentContext(persistDir, launchOpts);
+          }
+
+          throw retryErr;
+        }
+      }
+    }
+
+    throw err;
+  }
+}
+
+function findSystemChrome() {
+  var candidates = [];
+
+  if (process.platform === 'win32') {
+    var programFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
+    var programFiles86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+    var localAppData = process.env['LOCALAPPDATA'] || '';
+
+    candidates = [
+      path.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(programFiles86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(programFiles, 'Chromium', 'Application', 'chrome.exe'),
+      path.join(localAppData, 'Chromium', 'Application', 'chrome.exe'),
+      path.join(programFiles86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe')
+    ];
+  } else if (process.platform === 'darwin') {
+    candidates = [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+    ];
+  } else {
+    candidates = [
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/snap/bin/chromium'
+    ];
+  }
+
+  for (var i = 0; i < candidates.length; i++) {
+    if (fs.existsSync(candidates[i])) return candidates[i];
+  }
+  return null;
 }
 
 // ═══════════════════════════════════════════
@@ -141,7 +231,6 @@ if (!target) {
 async function runScan(mode) {
   var ts = Date.now();
 
-  // ─── Determine profile directory ───
   var persistDir;
   var isAutoGenerated = false;
 
@@ -172,7 +261,7 @@ async function runScan(mode) {
     console.log('[L2] Stealth plugin DISABLED (mode: ' + mode + ')');
   }
 
-  // ─── L1: PERSISTENT BROWSER LAUNCH (REG-022) ───
+  // ─── L1: PERSISTENT BROWSER LAUNCH (REG-022 + v7.1.0 auto-install) ───
   var launchArgs = [
     '--disable-blink-features=AutomationControlled',
     '--no-sandbox',
@@ -200,7 +289,8 @@ async function runScan(mode) {
 
   var context;
   try {
-    context = await chromium.launchPersistentContext(persistDir, launchOpts);
+    // v7.1.0: Use retry wrapper instead of direct launch
+    context = await launchBrowserWithRetry(chromium, persistDir, launchOpts);
   } catch (err) {
     console.error('[Sentinel] Failed to launch browser: ' + err.message);
     if (isAutoGenerated && fs.existsSync(persistDir)) {
@@ -214,7 +304,6 @@ async function runScan(mode) {
   var page = null;
 
   try {
-    // Get or create page
     var pages = context.pages();
     page = pages.length > 0 ? pages[0] : await context.newPage();
 
@@ -311,7 +400,6 @@ async function runScan(mode) {
     console.log('[L5] Final flush completed');
     await new Promise(function(resolve) { setTimeout(resolve, 500); });
 
-    // ─── Collect frame tree from Playwright ───
     var pwFrames = page.frames().map(function(f) {
       return { url: f.url(), name: f.name(), detached: f.isDetached() };
     });
@@ -330,13 +418,11 @@ async function runScan(mode) {
     console.log('  Frames: ' + frames.length + ' (CDP) + ' + pwFrames.length + ' (PW)');
     console.log('  Targets: ' + tgStats.discovered + ' discovered, ' + tgStats.attached + ' attached');
 
-    // ─── L11: ANALYSIS ───
     var engine = new CorrelationEngine(VERSION);
     var analysis = engine.analyze(events, frames.concat(pwFrames), pStats);
     console.log('  Categories detected: ' + analysis.categoryCount);
     console.log('  Risk score: ' + analysis.riskScore);
 
-    // ─── BUILD CONTEXT ───
     var contextData = {
       version: VERSION,
       target: target,
@@ -351,7 +437,7 @@ async function runScan(mode) {
       autoGenerated: isAutoGenerated,
       engine: 'hybrid-dual-telemetry',
       layers: {
-        L1: 'persistentContext + auto-cleanup',
+        L1: 'persistentContext + auto-cleanup + auto-install-retry',
         L2: useStealthForThisMode ? 'stealth-plugin (17 evasions) + rebrowser-patches' : 'rebrowser-patches only (no stealth)',
         L3: 'addInitScript (shield + interceptor, 42 categories)',
         L4: 'CDP session + Runtime.addBinding',
@@ -371,7 +457,6 @@ async function runScan(mode) {
       categoryCoverage: ((analysis.categoryCount / 42) * 100).toFixed(1) + '%'
     };
 
-    // ─── L12: REPORT GENERATION ───
     var reporter = new ReportGenerator(VERSION);
     var paths = reporter.save(mode, ts, events, analysis, contextData);
 
@@ -380,7 +465,6 @@ async function runScan(mode) {
     console.log('  HTML: ' + paths.html);
     console.log('  CTX:  ' + paths.context);
 
-    // ─── SUMMARY ───
     console.log('\n' + '='.repeat(59));
     console.log('  SCAN COMPLETE [' + mode.toUpperCase() + ']');
     console.log('  Events: ' + events.length + ' (hook:' + pStats.hookEvents + ' + cdp:' + pStats.cdpEvents + ' + page:' + pStats.pageEvents + ')');
@@ -395,10 +479,8 @@ async function runScan(mode) {
     console.error('\n[ERROR] ' + err.message);
     console.error(err.stack);
   } finally {
-    // Close browser
     try { await context.close(); } catch (e) {}
 
-    // ─── REG-027: Auto-cleanup persistent context ───
     if (isAutoGenerated && CLEANUP_PROFILE) {
       try {
         if (fs.existsSync(persistDir)) {
@@ -440,7 +522,6 @@ async function runScan(mode) {
       console.log('\n\u2705 Scan complete.');
     }
 
-    // Final cleanup
     cleanupTempDirs();
   } catch (err) {
     console.error('\u274C Fatal error: ' + err.message);
