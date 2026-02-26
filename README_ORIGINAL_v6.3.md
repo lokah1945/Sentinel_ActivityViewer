@@ -1,4 +1,3 @@
-# Sentinel v6.4.0
 # 🛡️ Sentinel Activity Viewer v6.3.0 — Pure Observer CCTV
 
 > Zero Injection. Zero Spoofing. 100% Passive CDP Observation.
