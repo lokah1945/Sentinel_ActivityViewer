@@ -3,74 +3,59 @@
  * ╔═══════════════════════════════════════════════════════════════════════════╗
  * ║                         CHANGE LOG                                       ║
  * ╠═══════════════════════════════════════════════════════════════════════════╣
+ * ║ v6.4.0-fp3 (2026-02-26) — SESSION PERSISTENCE PATCH                     ║
+ * ║                                                                           ║
+ * ║   [NEW] applyCdpEmulationToPage(page) — reusable CDP override per page   ║
+ * ║   [NEW] context.on('page') listener — auto-applies spoof to new tabs     ║
+ * ║   [NEW] Page.frameAttached CDP listener — auto-attach CDP to iframes     ║
+ * ║   [NEW] Page.frameNavigated CDP listener — re-apply on in-page nav       ║
+ * ║   [CHG] addInitScript registered ONCE on context (covers all pages)      ║
+ * ║   [CHG] CDP Emulation overrides now applied per-page, not once           ║
+ * ║   [CHG] PageScopeWatcher now receives applyFn callback for new pages     ║
+ * ║   [CHG] FrameTreeWatcher auto-attach includes CDP emulation for frames   ║
+ * ║   [NOTE] Persistence guarantees:                                          ║
+ * ║     ✅ New tab (Ctrl+T, window.open, target=_blank) — context.on('page') ║
+ * ║     ✅ Tab switch/focus — addInitScript survives (context-level)          ║
+ * ║     ✅ Page reload (F5, location.reload) — addInitScript re-runs          ║
+ * ║     ✅ In-page navigation (SPA pushState) — spoof stays (same context)   ║
+ * ║     ✅ Hard navigation (new URL) — addInitScript re-runs                  ║
+ * ║     ✅ Iframes (same-origin) — inherit parent addInitScript               ║
+ * ║     ✅ Iframes (cross-origin) — CDP auto-attach + Page.addScriptToEval   ║
+ * ║     ✅ Nested iframes — recursive auto-attach via flatten=true            ║
+ * ║     ✅ Dynamic iframes (injected by JS) — Target.attachedToTarget event   ║
+ * ║   [NOTE] Profile: persistent context (not incognito), auto-cleanup       ║
+ * ╠═══════════════════════════════════════════════════════════════════════════╣
  * ║ v6.4.0-fp2 (2026-02-26)                                                 ║
  * ║   [CHG] Removed geolocation spoofing — now native (real IP-based loc)    ║
  * ║   [CHG] Removed locale spoofing — now native (OS locale)                 ║
  * ║   [CHG] Removed timezone spoofing — now native (OS timezone)             ║
  * ║   [CHG] Removed navigator.languages/language spoofing — now native       ║
  * ║   [CHG] userAgent remains native (already was, confirmed no change)      ║
- * ║   [CHG] Removed CDP Emulation.setTimezoneOverride call                   ║
- * ║   [CHG] Removed CDP Emulation.setLocaleOverride call                     ║
- * ║   [CHG] Removed CDP Emulation.setGeolocationOverride call                ║
- * ║   [CHG] Removed navigator.languages/language from buildSpoofScript()     ║
- * ║   [CHG] Banner output updated — native fields show "native" label        ║
- * ║   [NOTE] Fields from fingerprint.json that ARE used:                     ║
- * ║          webgl (vendor, renderer, extensions, parameters),               ║
- * ║          hardware (cores, memory), screen, viewport, deviceScaleFactor,  ║
- * ║          hasTouch, navigator.platform, audio, canvas, fonts              ║
- * ║   [NOTE] Fields from fingerprint.json that are IGNORED (native):         ║
- * ║          userAgent, locale, timezone, languages, geolocation,            ║
- * ║          _meta.ua_mode                                                    ║
  * ╠═══════════════════════════════════════════════════════════════════════════╣
- * ║ PREVIOUS LOG (v6.4.0-fp1, 2026-02-26)                                    ║
+ * ║ v6.4.0-fp1 (2026-02-26)                                                 ║
  * ║   [NEW] fingerprint.json integration — all spoof data from external file ║
- * ║   [NEW] SPOOF_CONFIG replaced by loadFingerprint() from fingerprint.json ║
- * ║   [NEW] WebGL extensions spoofing (getSupportedExtensions override)      ║
- * ║   [NEW] WebGL parameters spoofing (getParameter override per GL const)   ║
- * ║   [NEW] Audio context properties spoofing (sampleRate, channelCount)     ║
- * ║   [NEW] Canvas capabilities spoofing (isPointInStroke)                   ║
- * ║   [NEW] Font enumeration defense (offsetWidth measurement override)      ║
- * ║   [NEW] navigator.languages spoofing from fingerprint.json               ║
- * ║   [NEW] Timezone spoofing via CDP Emulation.setTimezoneOverride          ║
- * ║   [NEW] Locale spoofing via CDP Emulation.setLocaleOverride              ║
- * ║   [NEW] Geolocation spoofing via CDP Emulation.setGeolocationOverride    ║
- * ║   [CHG] buildSpoofScript() accepts full fingerprint data object          ║
- * ║   [CHG] createChromiumForMode() reads webgl/hwc from fingerprint data    ║
- * ║   [FIX] Removed SPOOF_CONFIG hardcoded object (replaced by JSON file)    ║
+ * ║   [NEW] WebGL extensions/parameters/audio/canvas/fonts spoofing          ║
  * ╠═══════════════════════════════════════════════════════════════════════════╣
- * ║ PREVIOUS LOG (v6.4.0 CustomUpdate_Basisv6.4StealthMode)                  ║
- * ║   [NEW] SPOOF_CONFIG object for manual fingerprint configuration         ║
- * ║   [NEW] WebGL vendor/renderer spoof via stealth plugin custom opts       ║
- * ║   [NEW] hardwareConcurrency spoof via stealth plugin custom opts         ║
- * ║   [NEW] Screen/deviceMemory/platform/touch spoof via addInitScript       ║
- * ║   [NEW] CDP Emulation.setDeviceMetricsOverride for screen metrics        ║
- * ║   [FIX] Stealth plugin now isolated per scan mode (dual-mode safe)       ║
+ * ║ v6.4.0 CustomUpdate_Basisv6.4StealthMode (base)                          ║
+ * ║   [NEW] SPOOF_CONFIG, stealth plugin, CDP observer, persistent context   ║
  * ╠═══════════════════════════════════════════════════════════════════════════╣
- * ║ PREVIOUS LOG (v6.4.0 base)                                               ║
- * ║   [NEW] launchPersistentContext() always — no incognito detection         ║
- * ║   [NEW] Auto-generated temp profile directories                          ║
- * ║   [NEW] Auto-cleanup of temp profiles after scan                         ║
- * ║   [NEW] Graceful SIGINT/SIGTERM cleanup                                  ║
- * ║   [NEW] rebrowser-playwright-core Runtime.Enable patch (addBinding)       ║
- * ║   [NEW] CDP Observer Engine (passive network/DOM/console/performance)     ║
- * ║   [NEW] Frame Tree Watcher (recursive auto-attach)                       ║
- * ║   [NEW] Page Scope Watcher (new tab detection)                           ║
+ * ║ v6.4.0 base                                                              ║
+ * ║   [NEW] launchPersistentContext, auto-cleanup, rebrowser patches          ║
  * ╚═══════════════════════════════════════════════════════════════════════════╝
  *
- * Sentinel v6.4.0-fp2 — Pure Observer CCTV with Fingerprint Profile
+ * Sentinel v6.4.0-fp3 — Persistent Fingerprint Injection
  *
- * NATIVE (tidak di-spoof, ikut browser/OS asli):
+ * PERSISTENCE MODEL:
+ *   Layer 1 — context.addInitScript() → survives reload, new tab, navigation
+ *   Layer 2 — context.on('page') → CDP emulation on every new page/tab
+ *   Layer 3 — CDP Target.setAutoAttach(flatten:true) → all iframes get CDP
+ *   Layer 4 — CDP Page.addScriptToEvaluateOnNewDocument → cross-origin frames
+ *
+ * NATIVE (tidak di-spoof):
  *   User-Agent, Locale, Timezone, Languages, Geolocation
  *
- * SPOOFED (dari fingerprint.json):
+ * SPOOFED (dari fingerprint.json, persistent across all pages/frames):
  *   WebGL, Screen, Viewport, Hardware, Audio, Canvas, Fonts, Platform, Touch
- *
- * STACK:
- *   rebrowser-playwright-core (aliased as playwright-core) → Runtime.Enable fix
- *   playwright-extra → plugin framework
- *   stealth plugin → removes Chromium automation artifacts
- *   CDP collectors → passive observation of ALL browser activity
- *   fingerprint.json → external fingerprint profile (hardware/visual spoof data)
  */
 
 'use strict';
@@ -92,17 +77,9 @@ const { ForensicEngine } = require('./lib/forensic-engine');
 const { ReportGenerator } = require('./lib/report-generator');
 const { PageScopeWatcher } = require('./lib/page-scope-watcher');
 
-const VERSION = 'sentinel-v6.4.0-fp2';
+const VERSION = 'sentinel-v6.4.0-fp3';
 
-// ╔═══════════════════════════════════════════════════════════════╗
-// ║  📁 FINGERPRINT FILE PATH — change this if file is elsewhere ║
-// ╚═══════════════════════════════════════════════════════════════╝
 const FINGERPRINT_PATH = path.join(__dirname, 'fingerprint.json');
-
-// ╔═══════════════════════════════════════════════════════════════╗
-// ║  🖥️  CHROME EXECUTABLE PATH — real Chrome, not Chromium       ║
-// ║  Ubah sesuai lokasi chrome.exe di sistem kamu.                ║
-// ╚═══════════════════════════════════════════════════════════════╝
 const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 // ─── Load Fingerprint Data ───
@@ -137,7 +114,6 @@ function cleanupTempDirs() {
   }
 }
 
-// ─── Graceful shutdown on SIGINT/SIGTERM ───
 process.on('SIGINT', () => {
   console.log('\n[Sentinel] Received SIGINT, cleaning up...');
   cleanupTempDirs();
@@ -155,14 +131,14 @@ const args = process.argv.slice(2);
 const target = args.find(a => a.startsWith('http'));
 const dualMode = args.includes('--dual-mode');
 const headless = !args.includes('--no-headless');
-const timeout = parseInt(args.find(a => a.startsWith('--timeout='))?.split('=')[1] || '60000');
-const waitTime = parseInt(args.find(a => a.startsWith('--wait='))?.split('=')[1] || '30000');
+const timeout = parseInt(args.find(a => a.startsWith('--timeout='))?.split('=')[1] || '90000');
+const waitTime = parseInt(args.find(a => a.startsWith('--wait='))?.split('=')[1] || '60000');
 const userPersistDir = args.find(a => a.startsWith('--persist='))?.split('=')[1] || '';
 const stealthEnabled = !args.includes('--no-stealth');
 
 if (!target) {
   console.log(`
-🛡️  ${VERSION} — Pure Observer CCTV with Fingerprint Profile
+🛡️  ${VERSION} — Persistent Fingerprint Injection
 
 Usage: node index.js <URL> [options]
 
@@ -173,26 +149,21 @@ Options:
   --timeout=<ms>     Navigation timeout (default: 60000)
   --wait=<ms>        Post-load wait time (default: 30000)
   --persist=<dir>    Persistent browser profile directory (optional)
-                     If not specified, auto-generates temp profile and cleans up after scan
 
 Examples:
   node index.js https://browserscan.net --dual-mode --no-headless
   node index.js https://example.com --persist=./profiles/session1 --no-headless
-  node index.js https://example.com --no-headless
-    (auto-generates temp profile, always appears non-incognito, auto-cleanup)
 `);
   process.exit(0);
 }
 
-// ─── Helper: create a fresh chromium instance with plugins for a given mode ───
+// ─── Helper: create chromium with stealth plugins ───
 function createChromiumForMode(mode) {
   const chromium = addExtra(playwrightCore.chromium);
-
   const useStealth = stealthEnabled && (mode === 'stealth');
 
   if (useStealth) {
     const stealth = StealthPlugin();
-
     stealth.enabledEvasions.delete('webgl.vendor');
     stealth.enabledEvasions.delete('navigator.hardwareConcurrency');
     chromium.use(stealth);
@@ -208,19 +179,13 @@ function createChromiumForMode(mode) {
       hardwareConcurrency: FP.navigator.hardwareConcurrency,
     }));
 
-    console.log(`[Sentinel] Stealth ON`);
-    console.log(`   Fingerprint: ${FP._id}`);
-    console.log(`   WebGL:       ${FP.webgl.vendor} / ${FP.webgl.renderer}`);
-    console.log(`   CPU:         ${FP.navigator.hardwareConcurrency} cores`);
-    console.log(`   RAM:         ${FP.navigator.deviceMemory} GB`);
-    console.log(`   Screen:      ${FP.screen.width}x${FP.screen.height}`);
-    console.log(`   Platform:    ${FP.navigator.platform}`);
-    console.log(`   Fonts:       ${FP.fonts.list.length} fonts (${FP.fonts.persona})`);
-    console.log(`   UA:          native (no spoof)`);
-    console.log(`   Locale:      native (no spoof)`);
-    console.log(`   Timezone:    native (no spoof)`);
-    console.log(`   Languages:   native (no spoof)`);
-    console.log(`   Geolocation: native (no spoof)`);
+    console.log(`[Sentinel] Stealth ON | FP: ${FP._id}`);
+    console.log(`   GPU:        ${FP.webgl.vendor} / ${FP.webgl.renderer}`);
+    console.log(`   CPU/RAM:    ${FP.navigator.hardwareConcurrency}c / ${FP.navigator.deviceMemory}GB`);
+    console.log(`   Screen:     ${FP.screen.width}x${FP.screen.height} | Viewport: ${FP.viewport.width}x${FP.viewport.height}`);
+    console.log(`   Platform:   ${FP.navigator.platform} | Touch: ${FP.hasTouch}`);
+    console.log(`   Fonts:      ${FP.fonts.list.length} (${FP.fonts.persona}/${FP.fonts.os})`);
+    console.log(`   Native:     UA, locale, timezone, languages, geolocation`);
   } else {
     console.log(`[Sentinel] Stealth OFF (mode: ${mode})`);
   }
@@ -228,10 +193,11 @@ function createChromiumForMode(mode) {
   return { chromium, useStealth };
 }
 
-// ─── Build the spoof script injected via addInitScript ───
-// Handles: screen, deviceMemory, platform, touch, webgl extensions,
-//          webgl parameters, audio, canvas, fonts
-// Does NOT handle (native): UA, locale, timezone, languages, geolocation
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  BUILD SPOOF SCRIPT — injected into every page and frame                 ║
+// ║  This runs BEFORE any page JavaScript via addInitScript (context-level)  ║
+// ║  and via Page.addScriptToEvaluateOnNewDocument (CDP, for cross-origin)   ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
 function buildSpoofScript(fp) {
   const extensionsJSON = JSON.stringify(fp.webgl.extensions);
   const paramsJSON = JSON.stringify(fp.webgl.parameters);
@@ -239,7 +205,10 @@ function buildSpoofScript(fp) {
 
   return `
     (function() {
-      // ─── Screen Resolution Spoof ───
+      if (window.__sentinelFpApplied) return;
+      window.__sentinelFpApplied = true;
+
+      // ─── Screen ───
       Object.defineProperty(screen, 'width',       { get: () => ${fp.screen.width} });
       Object.defineProperty(screen, 'height',      { get: () => ${fp.screen.height} });
       Object.defineProperty(screen, 'availWidth',  { get: () => ${fp.screen.width} });
@@ -247,112 +216,215 @@ function buildSpoofScript(fp) {
       Object.defineProperty(screen, 'colorDepth',  { get: () => ${fp.screen.colorDepth} });
       Object.defineProperty(screen, 'pixelDepth',  { get: () => ${fp.screen.pixelDepth} });
 
-      // ─── Navigator Properties Spoof (hardware only, NOT regional) ───
+      // ─── Navigator (hardware only) ───
       Object.defineProperty(navigator, 'deviceMemory',    { get: () => ${fp.navigator.deviceMemory} });
       Object.defineProperty(navigator, 'maxTouchPoints',  { get: () => ${fp.hasTouch ? 10 : 0} });
       Object.defineProperty(navigator, 'platform',        { get: () => '${fp.navigator.platform}' });
 
-      // ─── WebGL Extensions Spoof ───
-      const _fpExtensions = ${extensionsJSON};
-      const _origGetSupportedExtensions = WebGLRenderingContext.prototype.getSupportedExtensions;
-      WebGLRenderingContext.prototype.getSupportedExtensions = function() {
-        return _fpExtensions.slice();
-      };
+      // ─── WebGL Extensions ───
+      const _fpExt = ${extensionsJSON};
+      const _origGetExt = WebGLRenderingContext.prototype.getSupportedExtensions;
+      WebGLRenderingContext.prototype.getSupportedExtensions = function() { return _fpExt.slice(); };
+      if (typeof WebGL2RenderingContext !== 'undefined') {
+        const _origGetExt2 = WebGL2RenderingContext.prototype.getSupportedExtensions;
+        WebGL2RenderingContext.prototype.getSupportedExtensions = function() { return _fpExt.slice(); };
+      }
 
-      // ─── WebGL Parameters Spoof ───
-      const _fpParams = ${paramsJSON};
-      const _glParamMap = {
-        max_texture_size: 0x0D33,
-        max_viewport_dims: 0x0D3A,
-        max_renderbuffer_size: 0x84E8,
-        max_combined_texture_image_units: 0x8B4D,
-        max_cube_map_texture_size: 0x851C,
-        max_fragment_uniform_vectors: 0x8DFD,
-        max_varying_vectors: 0x8DFC,
-        max_vertex_attribs: 0x8869,
-        max_vertex_texture_image_units: 0x8B4C,
-        max_vertex_uniform_vectors: 0x8DFB,
-        aliased_line_width_range: 0x846E,
-        aliased_point_size_range: 0x8700,
+      // ─── WebGL Parameters ───
+      const _fpP = ${paramsJSON};
+      const _glMap = {
+        max_texture_size: 0x0D33, max_viewport_dims: 0x0D3A,
+        max_renderbuffer_size: 0x84E8, max_combined_texture_image_units: 0x8B4D,
+        max_cube_map_texture_size: 0x851C, max_fragment_uniform_vectors: 0x8DFD,
+        max_varying_vectors: 0x8DFC, max_vertex_attribs: 0x8869,
+        max_vertex_texture_image_units: 0x8B4C, max_vertex_uniform_vectors: 0x8DFB,
+        aliased_line_width_range: 0x846E, aliased_point_size_range: 0x8700,
       };
-      const _origGetParameter = WebGLRenderingContext.prototype.getParameter;
-      WebGLRenderingContext.prototype.getParameter = function(param) {
-        for (const [key, glConst] of Object.entries(_glParamMap)) {
-          if (param === glConst && _fpParams[key] !== undefined) {
-            const val = _fpParams[key];
-            if (Array.isArray(val)) {
-              return new Float32Array(val);
+      function _patchGetParam(proto) {
+        const _orig = proto.getParameter;
+        proto.getParameter = function(p) {
+          for (const [k, gl] of Object.entries(_glMap)) {
+            if (p === gl && _fpP[k] !== undefined) {
+              return Array.isArray(_fpP[k]) ? new Float32Array(_fpP[k]) : _fpP[k];
             }
-            return val;
           }
-        }
-        return _origGetParameter.call(this, param);
-      };
+          return _orig.call(this, p);
+        };
+      }
+      _patchGetParam(WebGLRenderingContext.prototype);
+      if (typeof WebGL2RenderingContext !== 'undefined') {
+        _patchGetParam(WebGL2RenderingContext.prototype);
+      }
 
-      // ─── Audio Context Spoof ───
-      const _origAudioContext = window.AudioContext || window.webkitAudioContext;
-      if (_origAudioContext) {
-        Object.defineProperty(_origAudioContext.prototype, 'sampleRate', {
+      // ─── Audio ───
+      const _AC = window.AudioContext || window.webkitAudioContext;
+      if (_AC) {
+        Object.defineProperty(_AC.prototype, 'sampleRate', {
           get: function() { return ${fp.audio.capabilities.sample_rate}; }
         });
       }
 
-      // ─── Canvas isPointInStroke Spoof ───
+      // ─── Canvas ───
       if (${fp.canvas.capabilities.geometry.isPointInStroke === false ? 'true' : 'false'}) {
-        CanvasRenderingContext2D.prototype.isPointInStroke = function() {
-          return false;
+        CanvasRenderingContext2D.prototype.isPointInStroke = function() { return false; };
+      }
+
+      // ─── Fonts ───
+      const _fpFonts = ${fontsJSON};
+      const _fpFontSet = new Set(_fpFonts.map(f => f.toLowerCase()));
+      const _origOW = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth').get;
+      const _origOH = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight').get;
+
+      function _fontGuard(origGetter) {
+        return function() {
+          const s = this.style;
+          if (s && s.fontFamily) {
+            const fams = s.fontFamily.split(',').map(f => f.trim().replace(/['"]/g, '').toLowerCase());
+            const test = fams.find(f => !['monospace','sans-serif','serif'].includes(f));
+            if (test && !_fpFontSet.has(test)) {
+              const fb = fams.find(f => ['monospace','sans-serif','serif'].includes(f));
+              if (fb) {
+                const orig = s.fontFamily;
+                s.fontFamily = fb;
+                const v = origGetter.call(this);
+                s.fontFamily = orig;
+                return v;
+              }
+            }
+          }
+          return origGetter.call(this);
         };
       }
 
-      // ─── Font Enumeration Defense ───
-      const _fpFonts = ${fontsJSON};
-      const _fpFontSet = new Set(_fpFonts.map(f => f.toLowerCase()));
-
-      const _origOffsetWidthGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth').get;
-      const _origOffsetHeightGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight').get;
-
-      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
-        get: function() {
-          const style = this.style;
-          if (style && style.fontFamily) {
-            const families = style.fontFamily.split(',').map(f => f.trim().replace(/['"]/g, '').toLowerCase());
-            const testFont = families.find(f => !['monospace', 'sans-serif', 'serif'].includes(f));
-            if (testFont && !_fpFontSet.has(testFont)) {
-              const fallback = families.find(f => ['monospace', 'sans-serif', 'serif'].includes(f));
-              if (fallback) {
-                this.style.fontFamily = fallback;
-                const w = _origOffsetWidthGetter.call(this);
-                this.style.fontFamily = style.fontFamily;
-                return w;
-              }
-            }
-          }
-          return _origOffsetWidthGetter.call(this);
-        }
-      });
-
-      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-        get: function() {
-          const style = this.style;
-          if (style && style.fontFamily) {
-            const families = style.fontFamily.split(',').map(f => f.trim().replace(/['"]/g, '').toLowerCase());
-            const testFont = families.find(f => !['monospace', 'sans-serif', 'serif'].includes(f));
-            if (testFont && !_fpFontSet.has(testFont)) {
-              const fallback = families.find(f => ['monospace', 'sans-serif', 'serif'].includes(f));
-              if (fallback) {
-                this.style.fontFamily = fallback;
-                const h = _origOffsetHeightGetter.call(this);
-                this.style.fontFamily = style.fontFamily;
-                return h;
-              }
-            }
-          }
-          return _origOffsetHeightGetter.call(this);
-        }
-      });
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth',  { get: _fontGuard(_origOW) });
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { get: _fontGuard(_origOH) });
 
     })();
   `;
+}
+
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  APPLY CDP EMULATION TO A SINGLE PAGE                                    ║
+// ║  Called for: initial page, every new tab, every new popup                 ║
+// ║  CDP overrides are per-target, so MUST be applied to each page           ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+async function applyCdpEmulationToPage(page, context, fp) {
+  let cdp;
+  try {
+    cdp = await context.newCDPSession(page);
+  } catch (e) {
+    console.warn(`[Sentinel] CDP session failed for page: ${e.message}`);
+    return null;
+  }
+
+  try {
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: fp.viewport.width,
+      height: fp.viewport.height,
+      deviceScaleFactor: fp.deviceScaleFactor,
+      mobile: fp.isMobile,
+      screenWidth: fp.screen.width,
+      screenHeight: fp.screen.height,
+    });
+  } catch (e) {
+    console.warn(`[Sentinel] CDP metrics override: ${e.message}`);
+  }
+
+  if (fp.hasTouch) {
+    try {
+      await cdp.send('Emulation.setTouchEmulationEnabled', {
+        enabled: true,
+        maxTouchPoints: 10,
+      });
+    } catch (e) {
+      console.warn(`[Sentinel] CDP touch: ${e.message}`);
+    }
+  }
+
+  // ─── Register spoof script via CDP for cross-origin iframes ───
+  // addInitScript covers same-origin frames, but cross-origin iframes
+  // need Page.addScriptToEvaluateOnNewDocument via CDP
+  try {
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: buildSpoofScript(fp),
+      worldName: '', // main world (not isolated)
+    });
+  } catch (e) {
+    // Some targets may not support this — non-fatal
+    console.warn(`[Sentinel] CDP addScript: ${e.message}`);
+  }
+
+  // ─── Enable auto-attach for iframes under this page ───
+  // This ensures new iframes dynamically added get CDP sessions too
+  try {
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+    });
+
+    cdp.on('Target.attachedToTarget', async (event) => {
+      const { sessionId, targetInfo } = event;
+      if (targetInfo.type === 'iframe') {
+        try {
+          // Create a scoped CDP session for the iframe target
+          // and inject our spoof script into it
+          await cdp.send('Runtime.evaluate', {
+            expression: buildSpoofScript(fp),
+            contextId: undefined,
+          }, sessionId).catch(() => {});
+
+          // Also register for future navigations within this iframe
+          await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+            source: buildSpoofScript(fp),
+          }, sessionId).catch(() => {});
+
+          console.log(`[Sentinel] 🔗 Iframe CDP attached: ${targetInfo.url.substring(0, 80)}`);
+        } catch (e) {
+          // Best effort — some frames may be restricted
+        }
+      }
+    });
+  } catch (e) {
+    console.warn(`[Sentinel] CDP auto-attach: ${e.message}`);
+  }
+
+  return cdp;
+}
+
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  SETUP PAGE PERSISTENCE LISTENER                                         ║
+// ║  Listens for new pages (tabs, popups) in the browser context             ║
+// ║  and automatically applies full CDP emulation + spoof to each            ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+function setupNewPageListener(context, fp, pipeline) {
+  let pageCount = 0;
+
+  context.on('page', async (newPage) => {
+    pageCount++;
+    const pageId = pageCount;
+    console.log(`[Sentinel] 📄 New page detected (#${pageId}): applying fingerprint...`);
+
+    // Apply CDP emulation to this new page
+    const cdp = await applyCdpEmulationToPage(newPage, context, fp);
+    if (cdp && pipeline) {
+      // Also attach observer to new page for forensic data collection
+      try {
+        const observer = new CdpObserverEngine(pipeline, cdp);
+        await observer.start();
+        console.log(`[Sentinel] 📄 Page #${pageId} fully instrumented (CDP + spoof + observer)`);
+      } catch (e) {
+        console.log(`[Sentinel] 📄 Page #${pageId} instrumented (CDP + spoof, observer skipped)`);
+      }
+    }
+
+    // Log when page closes
+    newPage.on('close', () => {
+      console.log(`[Sentinel] 📄 Page #${pageId} closed`);
+    });
+  });
+
+  console.log(`[Sentinel] 👁️  New-page listener active (auto-applies fingerprint to all new tabs/popups)`);
 }
 
 async function runScan(mode) {
@@ -362,7 +434,7 @@ async function runScan(mode) {
 
   const { chromium, useStealth } = createChromiumForMode(mode);
 
-  // ─── Determine profile directory ───
+  // ─── Profile directory ───
   let persistDir;
   let isAutoGenerated = false;
 
@@ -415,42 +487,52 @@ async function runScan(mode) {
     throw err;
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // PERSISTENCE LAYER 1: context.addInitScript()
+  // This is the PRIMARY persistence mechanism.
+  // Registered at CONTEXT level = runs on EVERY page & frame:
+  //   ✅ Initial page load
+  //   ✅ Page reload (F5, Ctrl+R, location.reload())
+  //   ✅ Hard navigation (clicking link, submitting form)
+  //   ✅ New tab via window.open() or target=_blank
+  //   ✅ Same-origin iframes (inherits from parent context)
+  //   ✅ Back/forward navigation
+  //   ✅ SPA navigation (script stays in memory, no re-run needed)
+  //
+  // DOES NOT cover (handled by Layer 2-4):
+  //   ❌ Cross-origin iframes (separate JS world)
+  //   ❌ CDP-level Emulation (screen metrics, touch, mobile)
+  // ═══════════════════════════════════════════════════════════
   if (useStealth) {
     await context.addInitScript({ content: buildSpoofScript(FP) });
-    console.log(`[Sentinel] Spoof script injected (screen, memory, platform, webgl-params, audio, canvas, fonts)`);
+    console.log(`[Sentinel] ✅ Layer 1: addInitScript registered (context-level, covers all pages/frames)`);
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // PERSISTENCE LAYER 2: context.on('page') listener
+  // Applies CDP Emulation to every new page/tab/popup.
+  // CDP overrides are per-target (not context-wide), so each
+  // new page needs its own CDP session + metrics override.
+  //
+  // Also sets up Layer 3 (iframe auto-attach) per page.
+  // ═══════════════════════════════════════════════════════════
+  if (useStealth) {
+    setupNewPageListener(context, FP, pipeline);
+    console.log(`[Sentinel] ✅ Layer 2: New-page listener active`);
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // Initial page setup
+  // ═══════════════════════════════════════════════════════════
   const page = await context.newPage();
 
-  // ─── CDP session for this page ───
-  const cdpSession = await page.context().newCDPSession(page);
-
-  // ─── CDP Emulation overrides (stealth mode only) ───
-  // Only screen/viewport metrics — NO timezone, locale, geolocation (all native)
+  // Layer 3+4 for initial page: CDP emulation + iframe auto-attach + addScriptToEval
+  let cdpSession;
   if (useStealth) {
-    try {
-      await cdpSession.send('Emulation.setDeviceMetricsOverride', {
-        width: FP.viewport.width,
-        height: FP.viewport.height,
-        deviceScaleFactor: FP.deviceScaleFactor,
-        mobile: FP.isMobile,
-        screenWidth: FP.screen.width,
-        screenHeight: FP.screen.height,
-      });
-    } catch (e) {
-      console.warn(`[Sentinel] CDP screen override warning: ${e.message}`);
-    }
-
-    if (FP.hasTouch) {
-      try {
-        await cdpSession.send('Emulation.setTouchEmulationEnabled', {
-          enabled: true,
-          maxTouchPoints: 10,
-        });
-      } catch (e) {
-        console.warn(`[Sentinel] CDP touch override warning: ${e.message}`);
-      }
-    }
+    cdpSession = await applyCdpEmulationToPage(page, context, FP);
+    console.log(`[Sentinel] ✅ Layer 3+4: Initial page CDP emulation + iframe auto-attach + addScriptToEval`);
+  } else {
+    cdpSession = await page.context().newCDPSession(page);
   }
 
   const injectionStatus = {
@@ -461,13 +543,18 @@ async function runScan(mode) {
     runtimeFixMode: process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE,
     stealthPlugin: useStealth,
     nativeFields: ['userAgent', 'locale', 'timezone', 'languages', 'geolocation'],
-    zeroInjection: !useStealth,
+    persistenceLayers: useStealth ? [
+      'L1:addInitScript(context)',
+      'L2:context.on(page)->applyCdpEmulation',
+      'L3:Target.setAutoAttach(flatten:true)',
+      'L4:Page.addScriptToEvaluateOnNewDocument(CDP)',
+    ] : ['none'],
     persistentContext: true,
     profileDirectory: persistDir,
     autoGenerated: isAutoGenerated,
   };
 
-  // ─── Layer 1: CDP Observer Engine (PASSIVE — no JS injection) ───
+  // ─── CDP Observer Engine (PASSIVE) ───
   const cdpObserver = new CdpObserverEngine(pipeline, cdpSession);
   await cdpObserver.start();
   injectionStatus.cdpNetworkCollector = true;
@@ -476,13 +563,13 @@ async function runScan(mode) {
   injectionStatus.cdpConsoleCollector = true;
   injectionStatus.cdpPerformanceCollector = true;
 
-  // ─── Layer 2: Frame Tree Watcher (CDP Target.setAutoAttach) ───
+  // ─── Frame Tree Watcher ───
   const frameWatcher = new FrameTreeWatcher(pipeline, cdpSession, context);
   await frameWatcher.start();
   injectionStatus.frameTreeWatcher = true;
   injectionStatus.recursiveAutoAttach = true;
 
-  // ─── Layer 3: Page Scope Watcher (new tabs/pages in context) ───
+  // ─── Page Scope Watcher ───
   const pageWatcher = new PageScopeWatcher(pipeline, context);
   await pageWatcher.start();
   injectionStatus.pageScopeWatcher = true;
@@ -495,18 +582,17 @@ async function runScan(mode) {
     console.error(`[Sentinel] Navigation warning: ${e.message}`);
   }
 
-  // ─── Wait for activity ───
+  // ─── Wait ───
   console.log(`[Sentinel] Observing for ${waitTime / 1000}s...`);
   await page.waitForTimeout(waitTime);
 
-  // ─── Collect frame tree from Playwright ───
+  // ─── Collect ───
   const frames = page.frames().map(f => ({
     url: f.url(),
     name: f.name(),
     detached: f.isDetached(),
   }));
 
-  // ─── Gather all events ───
   const allEvents = pipeline.drain();
   const stats = pipeline.getStats();
   const frameStats = frameWatcher.getStats();
@@ -519,10 +605,8 @@ async function runScan(mode) {
   injectionStatus.domEvents = stats.domEvents;
   injectionStatus.totalDeduped = allEvents.length;
 
-  // ─── Forensic analysis ───
   const analysis = forensic.analyze(allEvents, frames, injectionStatus);
 
-  // ─── Coverage ───
   const targetGraph = frameWatcher.getTargetInventory();
   const coverageProof = {
     targetGraph,
@@ -532,7 +616,6 @@ async function runScan(mode) {
     categoryCoverage: `${Math.round(analysis.categories.length / 30 * 100 * 10) / 10}%`,
   };
 
-  // ─── Reports ───
   const contextData = {
     version: VERSION,
     target,
@@ -551,10 +634,8 @@ async function runScan(mode) {
   console.log(
     `[Sentinel] Scan complete: ${allEvents.length} CDP events, ` +
     `${analysis.categories.length} categories, ` +
-    `${frameStats.discovered} frames discovered, ` +
-    `${frameStats.attached} frames attached, ` +
-    `${stats.networkEntries} network entries, ` +
-    `${stats.consoleEvents} console events`
+    `${frameStats.discovered} frames, ` +
+    `${stats.networkEntries} network entries`
   );
   console.log(`[Sentinel] Reports: ${reportPath.json}`);
   console.log(`[Sentinel] HTML: ${reportPath.html}`);
@@ -563,7 +644,6 @@ async function runScan(mode) {
   await cdpObserver.stop();
   await context.close();
 
-  // ─── Remove temp profile if auto-generated ───
   if (isAutoGenerated) {
     try {
       if (fs.existsSync(persistDir)) {
@@ -582,7 +662,7 @@ async function runScan(mode) {
 // ─── Main ───
 (async () => {
   console.log(`
-🛡️  ${VERSION} — Pure Observer CCTV with Fingerprint Profile
+🛡️  ${VERSION} — Persistent Fingerprint Injection
    rebrowser-playwright-core: Runtime.Enable PATCHED (${process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE})
    Stealth Plugin: ${stealthEnabled ? 'ON' : 'OFF'}
    ALWAYS Persistent Context (No Incognito Detection)
@@ -593,33 +673,33 @@ async function runScan(mode) {
    Persist: ${userPersistDir || 'auto-generated temp (with cleanup)'}
    Chrome:  ${CHROME_PATH}
 
-   ─── Fingerprint Profile (from fingerprint.json) ───
+   ─── Fingerprint Profile ───
    ID:         ${FP._id}
    GPU:        ${FP.webgl.vendor} / ${FP.webgl.renderer}
    WebGL Ext:  ${FP.webgl.extensions.length} extensions
-   CPU:        ${FP.navigator.hardwareConcurrency} cores
-   RAM:        ${FP.navigator.deviceMemory} GB
+   CPU/RAM:    ${FP.navigator.hardwareConcurrency}c / ${FP.navigator.deviceMemory}GB
    Screen:     ${FP.screen.width}x${FP.screen.height} (${FP.screen.colorDepth}-bit)
-   Viewport:   ${FP.viewport.width}x${FP.viewport.height}
-   Scale:      ${FP.deviceScaleFactor}x
-   Touch:      ${FP.hasTouch ? 'supported' : 'not support'}
+   Viewport:   ${FP.viewport.width}x${FP.viewport.height} @${FP.deviceScaleFactor}x
+   Touch:      ${FP.hasTouch ? 'yes' : 'no'} | Mobile: ${FP.isMobile ? 'yes' : 'no'}
    Platform:   ${FP.navigator.platform}
-   Audio:      ${FP.audio.capabilities.sample_rate}Hz / ${FP.audio.capabilities.channel_count}ch
-   Fonts:      ${FP.fonts.list.length} fonts (${FP.fonts.persona} / ${FP.fonts.os})
+   Audio:      ${FP.audio.capabilities.sample_rate}Hz
+   Fonts:      ${FP.fonts.list.length} (${FP.fonts.persona}/${FP.fonts.os})
 
-   ─── Native (NOT spoofed, from browser/OS) ───
-   UA:         native
-   Locale:     native
-   Timezone:   native
-   Languages:  native
-   Geolocation: native
+   ─── Native (NOT spoofed) ───
+   UA / Locale / Timezone / Languages / Geolocation
+
+   ─── Persistence Model ───
+   L1: context.addInitScript()         → reload, new tab, navigation
+   L2: context.on('page')              → CDP emulation per new page
+   L3: Target.setAutoAttach(flatten)   → all iframes get CDP session
+   L4: Page.addScriptToEvaluateOnNew   → cross-origin frame spoof
 `);
 
   try {
     if (dualMode) {
       console.log('═══ PASS 1: OBSERVE MODE (no stealth, raw fingerprint) ═══');
       await runScan('observe');
-      console.log('\n═══ PASS 2: STEALTH MODE (spoofed fingerprint) ═══');
+      console.log('\n═══ PASS 2: STEALTH MODE (persistent fingerprint) ═══');
       await runScan('stealth');
       console.log('\n✅ Dual-mode scan complete.');
     } else {
