@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx playwright install chromium",
+    "postinstall": "node node_modules/playwright-core/cli.js install chromium",
     "test": "node test-regression.js"
   },
   "dependencies": {
