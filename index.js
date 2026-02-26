@@ -1,32 +1,76 @@
 #!/usr/bin/env node
 /**
- * Sentinel v6.4.0 — Pure Observer CCTV with Auto-Cleanup
- * 
- * PHILOSOPHY: This is a CCTV security camera, not a disguise.
- *   - ZERO injection into page JavaScript
- *   - ZERO spoofing (no UA override, no locale change, nothing)
- *   - ZERO modification of browser behavior
- *   - 100% passive CDP observation from outside the page
- *   - The "thief" (website) has NO idea it's being watched
- * 
- * NEW IN v6.4:
- *   - ALWAYS uses launchPersistentContext() to avoid incognito detection
- *   - Auto-generates temp profile directories when --persist= not specified
- *   - Auto-cleanup: removes temp profiles after scan completes
- *   - Graceful cleanup on SIGINT/SIGTERM for interrupted scans
- * 
- * HOW IT WORKS:
- *   rebrowser-playwright-core patches Runtime.Enable at source level,
- *   so CDP observation channels work WITHOUT triggering detection.
- *   stealth plugin removes automation artifacts that Chromium adds by default.
- *   We observe everything via CDP domains (Network, DOM, Runtime, etc.)
- *   without injecting a single line of JavaScript into any page.
+ * ╔═══════════════════════════════════════════════════════════════════════════╗
+ * ║                         CHANGE LOG                                       ║
+ * ╠═══════════════════════════════════════════════════════════════════════════╣
+ * ║ v6.4.0-fp2 (2026-02-26)                                                 ║
+ * ║   [CHG] Removed geolocation spoofing — now native (real IP-based loc)    ║
+ * ║   [CHG] Removed locale spoofing — now native (OS locale)                 ║
+ * ║   [CHG] Removed timezone spoofing — now native (OS timezone)             ║
+ * ║   [CHG] Removed navigator.languages/language spoofing — now native       ║
+ * ║   [CHG] userAgent remains native (already was, confirmed no change)      ║
+ * ║   [CHG] Removed CDP Emulation.setTimezoneOverride call                   ║
+ * ║   [CHG] Removed CDP Emulation.setLocaleOverride call                     ║
+ * ║   [CHG] Removed CDP Emulation.setGeolocationOverride call                ║
+ * ║   [CHG] Removed navigator.languages/language from buildSpoofScript()     ║
+ * ║   [CHG] Banner output updated — native fields show "native" label        ║
+ * ║   [NOTE] Fields from fingerprint.json that ARE used:                     ║
+ * ║          webgl (vendor, renderer, extensions, parameters),               ║
+ * ║          hardware (cores, memory), screen, viewport, deviceScaleFactor,  ║
+ * ║          hasTouch, navigator.platform, audio, canvas, fonts              ║
+ * ║   [NOTE] Fields from fingerprint.json that are IGNORED (native):         ║
+ * ║          userAgent, locale, timezone, languages, geolocation,            ║
+ * ║          _meta.ua_mode                                                    ║
+ * ╠═══════════════════════════════════════════════════════════════════════════╣
+ * ║ PREVIOUS LOG (v6.4.0-fp1, 2026-02-26)                                    ║
+ * ║   [NEW] fingerprint.json integration — all spoof data from external file ║
+ * ║   [NEW] SPOOF_CONFIG replaced by loadFingerprint() from fingerprint.json ║
+ * ║   [NEW] WebGL extensions spoofing (getSupportedExtensions override)      ║
+ * ║   [NEW] WebGL parameters spoofing (getParameter override per GL const)   ║
+ * ║   [NEW] Audio context properties spoofing (sampleRate, channelCount)     ║
+ * ║   [NEW] Canvas capabilities spoofing (isPointInStroke)                   ║
+ * ║   [NEW] Font enumeration defense (offsetWidth measurement override)      ║
+ * ║   [NEW] navigator.languages spoofing from fingerprint.json               ║
+ * ║   [NEW] Timezone spoofing via CDP Emulation.setTimezoneOverride          ║
+ * ║   [NEW] Locale spoofing via CDP Emulation.setLocaleOverride              ║
+ * ║   [NEW] Geolocation spoofing via CDP Emulation.setGeolocationOverride    ║
+ * ║   [CHG] buildSpoofScript() accepts full fingerprint data object          ║
+ * ║   [CHG] createChromiumForMode() reads webgl/hwc from fingerprint data    ║
+ * ║   [FIX] Removed SPOOF_CONFIG hardcoded object (replaced by JSON file)    ║
+ * ╠═══════════════════════════════════════════════════════════════════════════╣
+ * ║ PREVIOUS LOG (v6.4.0 CustomUpdate_Basisv6.4StealthMode)                  ║
+ * ║   [NEW] SPOOF_CONFIG object for manual fingerprint configuration         ║
+ * ║   [NEW] WebGL vendor/renderer spoof via stealth plugin custom opts       ║
+ * ║   [NEW] hardwareConcurrency spoof via stealth plugin custom opts         ║
+ * ║   [NEW] Screen/deviceMemory/platform/touch spoof via addInitScript       ║
+ * ║   [NEW] CDP Emulation.setDeviceMetricsOverride for screen metrics        ║
+ * ║   [FIX] Stealth plugin now isolated per scan mode (dual-mode safe)       ║
+ * ╠═══════════════════════════════════════════════════════════════════════════╣
+ * ║ PREVIOUS LOG (v6.4.0 base)                                               ║
+ * ║   [NEW] launchPersistentContext() always — no incognito detection         ║
+ * ║   [NEW] Auto-generated temp profile directories                          ║
+ * ║   [NEW] Auto-cleanup of temp profiles after scan                         ║
+ * ║   [NEW] Graceful SIGINT/SIGTERM cleanup                                  ║
+ * ║   [NEW] rebrowser-playwright-core Runtime.Enable patch (addBinding)       ║
+ * ║   [NEW] CDP Observer Engine (passive network/DOM/console/performance)     ║
+ * ║   [NEW] Frame Tree Watcher (recursive auto-attach)                       ║
+ * ║   [NEW] Page Scope Watcher (new tab detection)                           ║
+ * ╚═══════════════════════════════════════════════════════════════════════════╝
+ *
+ * Sentinel v6.4.0-fp2 — Pure Observer CCTV with Fingerprint Profile
+ *
+ * NATIVE (tidak di-spoof, ikut browser/OS asli):
+ *   User-Agent, Locale, Timezone, Languages, Geolocation
+ *
+ * SPOOFED (dari fingerprint.json):
+ *   WebGL, Screen, Viewport, Hardware, Audio, Canvas, Fonts, Platform, Touch
  *
  * STACK:
  *   rebrowser-playwright-core (aliased as playwright-core) → Runtime.Enable fix
  *   playwright-extra → plugin framework
  *   stealth plugin → removes Chromium automation artifacts
  *   CDP collectors → passive observation of ALL browser activity
+ *   fingerprint.json → external fingerprint profile (hardware/visual spoof data)
  */
 
 'use strict';
@@ -48,87 +92,33 @@ const { ForensicEngine } = require('./lib/forensic-engine');
 const { ReportGenerator } = require('./lib/report-generator');
 const { PageScopeWatcher } = require('./lib/page-scope-watcher');
 
-const VERSION = 'sentinel-v6.4.0';
+const VERSION = 'sentinel-v6.4.0-fp2';
 
 // ╔═══════════════════════════════════════════════════════════════╗
-// ║           🎛️  SPOOF CONFIGURATION — EDIT HERE                ║
-// ║  Ubah nilai-nilai di bawah ini sesuai keinginan kamu.        ║
-// ║  Pastikan konsisten (misal: GPU NVIDIA cocok dgn Windows).   ║
+// ║  📁 FINGERPRINT FILE PATH — change this if file is elsewhere ║
 // ╚═══════════════════════════════════════════════════════════════╝
-
-const SPOOF_CONFIG = {
-
-  // ─── GPU / WebGL ───────────────────────────────────────────────
-  // Terlihat di browserscan.net → "Unmasked Vendor" & "Unmasked Renderer"
-  // Contoh lain:
-  //   'ATI Technologies Inc.' / 'AMD Radeon RX 580'
-  //   'Intel Inc.'           / 'Intel(R) UHD Graphics 630'
-  //   'Apple'                / 'Apple M1'
-  webgl: {
-    vendor:   'NVIDIA Corporation',
-    renderer: 'NVIDIA GeForce RTX 3060/PCIe/SSE2',
-  },
-
-  // ─── Hardware Concurrency (CPU cores) ──────────────────────────
-  // Terlihat di browserscan.net → "Hardware Concurrency"
-  // Nilai umum: 2, 4, 6, 8, 12, 16
-  // Tips: Cocokkan dengan tipe device yang kamu tiru.
-  //   - Laptop biasa: 4 atau 8
-  //   - Desktop gaming: 8, 12, atau 16
-  //   - Server/VPS asli kamu mungkin 2 — jadi spoof ke 8 lebih realistis
-  hardwareConcurrency: 6,
-
-  // ─── Device Memory (RAM dalam GB) ──────────────────────────────
-  // Terlihat di browserscan.net → "Device Memory"
-  // Nilai yang valid (browser hanya report power of 2):
-  //   0.25, 0.5, 1, 2, 4, 8
-  // Catatan: Browser cap di 8 max, jadi 16/32 GB tetap dilaporkan 8.
-  deviceMemory: 8,
-
-  // ─── Screen Resolution ─────────────────────────────────────────
-  // Terlihat di browserscan.net → "Screen Resolution" & "Available Screen Size"
-  // screenWidth x screenHeight = resolusi layar penuh
-  // availWidth x availHeight   = resolusi tanpa taskbar (biasanya height - 48px)
-  // Contoh umum:
-  //   1920×1080 (Full HD) → avail 1920×1032
-  //   2560×1440 (2K/QHD)  → avail 2560×1392
-  //   1366×768  (Laptop)  → avail 1366×720
-  //   3840×2160 (4K)      → avail 3840×2112
-  screen: {
-    width:       1920,
-    height:      1080,
-    availWidth:  1920,
-    availHeight: 1032,
-    colorDepth:  24,     // 24 atau 32
-    pixelDepth:  24,     // biasanya sama dengan colorDepth
-  },
-
-  // ─── Touch Support ─────────────────────────────────────────────
-  // Terlihat di browserscan.net → "Touch Support"
-  // Desktop biasa: maxTouchPoints = 0 (not support)
-  // Laptop touchscreen: maxTouchPoints = 10
-  // Mobile: maxTouchPoints = 5 atau 10
-  maxTouchPoints: 0,
-
-  // ─── Platform ──────────────────────────────────────────────────
-  // Terlihat di browserscan.net → platform info
-  // Contoh: 'Win32', 'MacIntel', 'Linux x86_64'
-  // Harus cocok dengan User-Agent!
-  platform: 'Win32',
-
-  // ─── Chrome Executable Path ────────────────────────────────────
-  // Kosongkan '' untuk pakai Chromium bawaan Playwright.
-  // Isi path ke chrome.exe untuk pakai Chrome asli sistem.
-  // Windows: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
-  // Linux:   '/usr/bin/google-chrome'
-  // Mac:     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-  executablePath: '',
-};
+const FINGERPRINT_PATH = path.join(__dirname, 'fingerprint.json');
 
 // ╔═══════════════════════════════════════════════════════════════╗
-// ║          END OF SPOOF CONFIGURATION                          ║
+// ║  🖥️  CHROME EXECUTABLE PATH — real Chrome, not Chromium       ║
+// ║  Ubah sesuai lokasi chrome.exe di sistem kamu.                ║
 // ╚═══════════════════════════════════════════════════════════════╝
+const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
+// ─── Load Fingerprint Data ───
+function loadFingerprint() {
+  if (!fs.existsSync(FINGERPRINT_PATH)) {
+    console.error(`[Sentinel] FATAL: fingerprint.json not found at: ${FINGERPRINT_PATH}`);
+    console.error(`[Sentinel] Place your fingerprint.json in the same directory as index.js`);
+    process.exit(1);
+  }
+  const raw = fs.readFileSync(FINGERPRINT_PATH, 'utf-8');
+  const fp = JSON.parse(raw);
+  console.log(`[Sentinel] Loaded fingerprint: ${fp._id || 'unknown'}`);
+  return fp;
+}
+
+const FP = loadFingerprint();
 
 // ─── Temp Profile Cleanup Registry ───
 const tempDirsToCleanup = new Set();
@@ -172,7 +162,7 @@ const stealthEnabled = !args.includes('--no-stealth');
 
 if (!target) {
   console.log(`
-🛡️  ${VERSION} — Pure Observer CCTV with Auto-Cleanup
+🛡️  ${VERSION} — Pure Observer CCTV with Fingerprint Profile
 
 Usage: node index.js <URL> [options]
 
@@ -198,38 +188,39 @@ Examples:
 function createChromiumForMode(mode) {
   const chromium = addExtra(playwrightCore.chromium);
 
-  // In dual-mode, observe pass runs WITHOUT stealth to see raw fingerprint.
-  // Stealth pass runs WITH stealth to see the masked fingerprint.
-  // In single mode, stealth is always applied (unless --no-stealth).
   const useStealth = stealthEnabled && (mode === 'stealth');
 
   if (useStealth) {
     const stealth = StealthPlugin();
 
-    // Remove evasions we want to configure manually with custom values
     stealth.enabledEvasions.delete('webgl.vendor');
     stealth.enabledEvasions.delete('navigator.hardwareConcurrency');
     chromium.use(stealth);
 
-    // Load webgl.vendor evasion with custom GPU
     const webglVendorPlugin = require('puppeteer-extra-plugin-stealth/evasions/webgl.vendor');
     chromium.use(webglVendorPlugin({
-      vendor: SPOOF_CONFIG.webgl.vendor,
-      renderer: SPOOF_CONFIG.webgl.renderer,
+      vendor: FP.webgl.vendor,
+      renderer: FP.webgl.renderer,
     }));
 
-    // Load hardwareConcurrency evasion with custom core count
     const hwcPlugin = require('puppeteer-extra-plugin-stealth/evasions/navigator.hardwareConcurrency');
     chromium.use(hwcPlugin({
-      hardwareConcurrency: SPOOF_CONFIG.hardwareConcurrency,
+      hardwareConcurrency: FP.navigator.hardwareConcurrency,
     }));
 
     console.log(`[Sentinel] Stealth ON`);
-    console.log(`   WebGL:    ${SPOOF_CONFIG.webgl.vendor} / ${SPOOF_CONFIG.webgl.renderer}`);
-    console.log(`   CPU:      ${SPOOF_CONFIG.hardwareConcurrency} cores`);
-    console.log(`   RAM:      ${SPOOF_CONFIG.deviceMemory} GB`);
-    console.log(`   Screen:   ${SPOOF_CONFIG.screen.width}x${SPOOF_CONFIG.screen.height}`);
-    console.log(`   Platform: ${SPOOF_CONFIG.platform}`);
+    console.log(`   Fingerprint: ${FP._id}`);
+    console.log(`   WebGL:       ${FP.webgl.vendor} / ${FP.webgl.renderer}`);
+    console.log(`   CPU:         ${FP.navigator.hardwareConcurrency} cores`);
+    console.log(`   RAM:         ${FP.navigator.deviceMemory} GB`);
+    console.log(`   Screen:      ${FP.screen.width}x${FP.screen.height}`);
+    console.log(`   Platform:    ${FP.navigator.platform}`);
+    console.log(`   Fonts:       ${FP.fonts.list.length} fonts (${FP.fonts.persona})`);
+    console.log(`   UA:          native (no spoof)`);
+    console.log(`   Locale:      native (no spoof)`);
+    console.log(`   Timezone:    native (no spoof)`);
+    console.log(`   Languages:   native (no spoof)`);
+    console.log(`   Geolocation: native (no spoof)`);
   } else {
     console.log(`[Sentinel] Stealth OFF (mode: ${mode})`);
   }
@@ -238,29 +229,129 @@ function createChromiumForMode(mode) {
 }
 
 // ─── Build the spoof script injected via addInitScript ───
-// This handles properties NOT covered by stealth plugin evasions:
-//   - screen dimensions (width, height, availWidth, availHeight, colorDepth, pixelDepth)
-//   - navigator.deviceMemory
-//   - navigator.maxTouchPoints
-//   - navigator.platform
-function buildSpoofScript(config) {
+// Handles: screen, deviceMemory, platform, touch, webgl extensions,
+//          webgl parameters, audio, canvas, fonts
+// Does NOT handle (native): UA, locale, timezone, languages, geolocation
+function buildSpoofScript(fp) {
+  const extensionsJSON = JSON.stringify(fp.webgl.extensions);
+  const paramsJSON = JSON.stringify(fp.webgl.parameters);
+  const fontsJSON = JSON.stringify(fp.fonts.list);
+
   return `
-    // ─── Screen Resolution Spoof ───
-    Object.defineProperty(screen, 'width',       { get: () => ${config.screen.width} });
-    Object.defineProperty(screen, 'height',      { get: () => ${config.screen.height} });
-    Object.defineProperty(screen, 'availWidth',  { get: () => ${config.screen.availWidth} });
-    Object.defineProperty(screen, 'availHeight', { get: () => ${config.screen.availHeight} });
-    Object.defineProperty(screen, 'colorDepth',  { get: () => ${config.screen.colorDepth} });
-    Object.defineProperty(screen, 'pixelDepth',  { get: () => ${config.screen.pixelDepth} });
+    (function() {
+      // ─── Screen Resolution Spoof ───
+      Object.defineProperty(screen, 'width',       { get: () => ${fp.screen.width} });
+      Object.defineProperty(screen, 'height',      { get: () => ${fp.screen.height} });
+      Object.defineProperty(screen, 'availWidth',  { get: () => ${fp.screen.width} });
+      Object.defineProperty(screen, 'availHeight', { get: () => ${fp.screen.height} });
+      Object.defineProperty(screen, 'colorDepth',  { get: () => ${fp.screen.colorDepth} });
+      Object.defineProperty(screen, 'pixelDepth',  { get: () => ${fp.screen.pixelDepth} });
 
-    // ─── Device Memory Spoof ───
-    Object.defineProperty(navigator, 'deviceMemory', { get: () => ${config.deviceMemory} });
+      // ─── Navigator Properties Spoof (hardware only, NOT regional) ───
+      Object.defineProperty(navigator, 'deviceMemory',    { get: () => ${fp.navigator.deviceMemory} });
+      Object.defineProperty(navigator, 'maxTouchPoints',  { get: () => ${fp.hasTouch ? 10 : 0} });
+      Object.defineProperty(navigator, 'platform',        { get: () => '${fp.navigator.platform}' });
 
-    // ─── Touch Support Spoof ───
-    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => ${config.maxTouchPoints} });
+      // ─── WebGL Extensions Spoof ───
+      const _fpExtensions = ${extensionsJSON};
+      const _origGetSupportedExtensions = WebGLRenderingContext.prototype.getSupportedExtensions;
+      WebGLRenderingContext.prototype.getSupportedExtensions = function() {
+        return _fpExtensions.slice();
+      };
 
-    // ─── Platform Spoof ───
-    Object.defineProperty(navigator, 'platform', { get: () => '${config.platform}' });
+      // ─── WebGL Parameters Spoof ───
+      const _fpParams = ${paramsJSON};
+      const _glParamMap = {
+        max_texture_size: 0x0D33,
+        max_viewport_dims: 0x0D3A,
+        max_renderbuffer_size: 0x84E8,
+        max_combined_texture_image_units: 0x8B4D,
+        max_cube_map_texture_size: 0x851C,
+        max_fragment_uniform_vectors: 0x8DFD,
+        max_varying_vectors: 0x8DFC,
+        max_vertex_attribs: 0x8869,
+        max_vertex_texture_image_units: 0x8B4C,
+        max_vertex_uniform_vectors: 0x8DFB,
+        aliased_line_width_range: 0x846E,
+        aliased_point_size_range: 0x8700,
+      };
+      const _origGetParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function(param) {
+        for (const [key, glConst] of Object.entries(_glParamMap)) {
+          if (param === glConst && _fpParams[key] !== undefined) {
+            const val = _fpParams[key];
+            if (Array.isArray(val)) {
+              return new Float32Array(val);
+            }
+            return val;
+          }
+        }
+        return _origGetParameter.call(this, param);
+      };
+
+      // ─── Audio Context Spoof ───
+      const _origAudioContext = window.AudioContext || window.webkitAudioContext;
+      if (_origAudioContext) {
+        Object.defineProperty(_origAudioContext.prototype, 'sampleRate', {
+          get: function() { return ${fp.audio.capabilities.sample_rate}; }
+        });
+      }
+
+      // ─── Canvas isPointInStroke Spoof ───
+      if (${fp.canvas.capabilities.geometry.isPointInStroke === false ? 'true' : 'false'}) {
+        CanvasRenderingContext2D.prototype.isPointInStroke = function() {
+          return false;
+        };
+      }
+
+      // ─── Font Enumeration Defense ───
+      const _fpFonts = ${fontsJSON};
+      const _fpFontSet = new Set(_fpFonts.map(f => f.toLowerCase()));
+
+      const _origOffsetWidthGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth').get;
+      const _origOffsetHeightGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight').get;
+
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+        get: function() {
+          const style = this.style;
+          if (style && style.fontFamily) {
+            const families = style.fontFamily.split(',').map(f => f.trim().replace(/['"]/g, '').toLowerCase());
+            const testFont = families.find(f => !['monospace', 'sans-serif', 'serif'].includes(f));
+            if (testFont && !_fpFontSet.has(testFont)) {
+              const fallback = families.find(f => ['monospace', 'sans-serif', 'serif'].includes(f));
+              if (fallback) {
+                this.style.fontFamily = fallback;
+                const w = _origOffsetWidthGetter.call(this);
+                this.style.fontFamily = style.fontFamily;
+                return w;
+              }
+            }
+          }
+          return _origOffsetWidthGetter.call(this);
+        }
+      });
+
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+        get: function() {
+          const style = this.style;
+          if (style && style.fontFamily) {
+            const families = style.fontFamily.split(',').map(f => f.trim().replace(/['"]/g, '').toLowerCase());
+            const testFont = families.find(f => !['monospace', 'sans-serif', 'serif'].includes(f));
+            if (testFont && !_fpFontSet.has(testFont)) {
+              const fallback = families.find(f => ['monospace', 'sans-serif', 'serif'].includes(f));
+              if (fallback) {
+                this.style.fontFamily = fallback;
+                const h = _origOffsetHeightGetter.call(this);
+                this.style.fontFamily = style.fontFamily;
+                return h;
+              }
+            }
+          }
+          return _origOffsetHeightGetter.call(this);
+        }
+      });
+
+    })();
   `;
 }
 
@@ -269,7 +360,6 @@ async function runScan(mode) {
   const pipeline = new EventPipeline();
   const forensic = new ForensicEngine(VERSION);
 
-  // ─── Create fresh chromium instance per mode (FIX: stealth isolation) ───
   const { chromium, useStealth } = createChromiumForMode(mode);
 
   // ─── Determine profile directory ───
@@ -301,24 +391,17 @@ async function runScan(mode) {
     '--enable-features=NetworkService,NetworkServiceInProcess',
   ];
 
-  // If screen spoof is active, set window size to match so CSS media queries are consistent
   if (useStealth) {
-    launchArgs.push(`--window-size=${SPOOF_CONFIG.screen.width},${SPOOF_CONFIG.screen.height}`);
+    launchArgs.push(`--window-size=${FP.viewport.width},${FP.viewport.height}`);
   }
 
-const launchOpts = {
+  const launchOpts = {
     headless: mode === 'stealth' ? headless : false,
     args: launchArgs,
     ignoreDefaultArgs: ['--enable-automation'],
     viewport: null,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-};
-
-
-  // Use custom Chrome if configured
-  if (SPOOF_CONFIG.executablePath) {
-    launchOpts.executablePath = SPOOF_CONFIG.executablePath;
-  }
+    executablePath: CHROME_PATH,
+  };
 
   let context;
   try {
@@ -332,10 +415,9 @@ const launchOpts = {
     throw err;
   }
 
-  // ─── Inject spoof script for properties NOT handled by stealth plugin ───
   if (useStealth) {
-    await context.addInitScript({ content: buildSpoofScript(SPOOF_CONFIG) });
-    console.log(`[Sentinel] Spoof script injected (screen, deviceMemory, platform, touch)`);
+    await context.addInitScript({ content: buildSpoofScript(FP) });
+    console.log(`[Sentinel] Spoof script injected (screen, memory, platform, webgl-params, audio, canvas, fonts)`);
   }
 
   const page = await context.newPage();
@@ -343,31 +425,42 @@ const launchOpts = {
   // ─── CDP session for this page ───
   const cdpSession = await page.context().newCDPSession(page);
 
-  // ─── Override screen metrics via CDP for even deeper spoofing ───
-  // This ensures window.innerWidth/innerHeight and CSS media queries match
+  // ─── CDP Emulation overrides (stealth mode only) ───
+  // Only screen/viewport metrics — NO timezone, locale, geolocation (all native)
   if (useStealth) {
     try {
       await cdpSession.send('Emulation.setDeviceMetricsOverride', {
-        width: SPOOF_CONFIG.screen.width,
-        height: SPOOF_CONFIG.screen.height,
-        deviceScaleFactor: 1,
-        mobile: false,
-        screenWidth: SPOOF_CONFIG.screen.width,
-        screenHeight: SPOOF_CONFIG.screen.height,
+        width: FP.viewport.width,
+        height: FP.viewport.height,
+        deviceScaleFactor: FP.deviceScaleFactor,
+        mobile: FP.isMobile,
+        screenWidth: FP.screen.width,
+        screenHeight: FP.screen.height,
       });
     } catch (e) {
-      // Non-fatal: some Chromium versions may not support all params
       console.warn(`[Sentinel] CDP screen override warning: ${e.message}`);
+    }
+
+    if (FP.hasTouch) {
+      try {
+        await cdpSession.send('Emulation.setTouchEmulationEnabled', {
+          enabled: true,
+          maxTouchPoints: 10,
+        });
+      } catch (e) {
+        console.warn(`[Sentinel] CDP touch override warning: ${e.message}`);
+      }
     }
   }
 
   const injectionStatus = {
     version: VERSION,
     mode,
+    fingerprintId: FP._id,
     rebrowserPatched: true,
     runtimeFixMode: process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE,
     stealthPlugin: useStealth,
-    spoofConfig: useStealth ? SPOOF_CONFIG : 'none (raw observation)',
+    nativeFields: ['userAgent', 'locale', 'timezone', 'languages', 'geolocation'],
     zeroInjection: !useStealth,
     persistentContext: true,
     profileDirectory: persistDir,
@@ -445,6 +538,7 @@ const launchOpts = {
     target,
     scanDate: new Date(ts).toISOString(),
     mode,
+    fingerprintId: FP._id,
     frames,
     injectionStatus,
     targetGraph,
@@ -488,27 +582,37 @@ const launchOpts = {
 // ─── Main ───
 (async () => {
   console.log(`
-🛡️  ${VERSION} — Pure Observer CCTV with Auto-Cleanup
+🛡️  ${VERSION} — Pure Observer CCTV with Fingerprint Profile
    rebrowser-playwright-core: Runtime.Enable PATCHED (${process.env.REBROWSER_PATCHES_RUNTIME_FIX_MODE})
    Stealth Plugin: ${stealthEnabled ? 'ON' : 'OFF'}
-   ZERO Injection | ZERO Spoofing | 100% Passive CDP Observation
    ALWAYS Persistent Context (No Incognito Detection)
    Target: ${target}
    Mode: ${dualMode ? 'DUAL (observe → stealth)' : 'stealth'}
    Headless: ${headless}
    Timeout: ${timeout}ms | Wait: ${waitTime}ms
    Persist: ${userPersistDir || 'auto-generated temp (with cleanup)'}
+   Chrome:  ${CHROME_PATH}
 
-   ─── Spoof Profile ───
-   GPU:      ${SPOOF_CONFIG.webgl.vendor} / ${SPOOF_CONFIG.webgl.renderer}
-   CPU:      ${SPOOF_CONFIG.hardwareConcurrency} cores
-   RAM:      ${SPOOF_CONFIG.deviceMemory} GB
-   Screen:   ${SPOOF_CONFIG.screen.width}x${SPOOF_CONFIG.screen.height}
-   Avail:    ${SPOOF_CONFIG.screen.availWidth}x${SPOOF_CONFIG.screen.availHeight}
-   Depth:    ${SPOOF_CONFIG.screen.colorDepth}-bit
-   Touch:    ${SPOOF_CONFIG.maxTouchPoints > 0 ? SPOOF_CONFIG.maxTouchPoints + ' points' : 'not support'}
-   Platform: ${SPOOF_CONFIG.platform}
-   Chrome:   ${SPOOF_CONFIG.executablePath || 'bundled Chromium'}
+   ─── Fingerprint Profile (from fingerprint.json) ───
+   ID:         ${FP._id}
+   GPU:        ${FP.webgl.vendor} / ${FP.webgl.renderer}
+   WebGL Ext:  ${FP.webgl.extensions.length} extensions
+   CPU:        ${FP.navigator.hardwareConcurrency} cores
+   RAM:        ${FP.navigator.deviceMemory} GB
+   Screen:     ${FP.screen.width}x${FP.screen.height} (${FP.screen.colorDepth}-bit)
+   Viewport:   ${FP.viewport.width}x${FP.viewport.height}
+   Scale:      ${FP.deviceScaleFactor}x
+   Touch:      ${FP.hasTouch ? 'supported' : 'not support'}
+   Platform:   ${FP.navigator.platform}
+   Audio:      ${FP.audio.capabilities.sample_rate}Hz / ${FP.audio.capabilities.channel_count}ch
+   Fonts:      ${FP.fonts.list.length} fonts (${FP.fonts.persona} / ${FP.fonts.os})
+
+   ─── Native (NOT spoofed, from browser/OS) ───
+   UA:         native
+   Locale:     native
+   Timezone:   native
+   Languages:  native
+   Geolocation: native
 `);
 
   try {
@@ -523,7 +627,6 @@ const launchOpts = {
       console.log('\n✅ Scan complete.');
     }
 
-    // Final cleanup
     cleanupTempDirs();
   } catch (err) {
     console.error('❌ Fatal error:', err);
